@@ -1,0 +1,82 @@
+# ============================================================
+#  gogo-assets — .gitignore
+#  Go inventory/drift tool pulling LIVE org data from Google
+#  Workspace, JumpCloud, Sophos. Two things must never land in
+#  git: credentials and runtime snapshots (live org data).
+# ============================================================
+
+# ----------------------------------------------------------------
+#  Secrets & credentials  — NEVER commit
+# ----------------------------------------------------------------
+# Env files (keep the example template)
+.env
+.env.*
+!.env.example
+
+# Google / GCP service-account & SDK keys — name-based safety net.
+# Catches *-sa.json, *service-account*.json, *-sdk-*.json
+# (e.g. vkost-admin-sdk-read-only-...json), credential dumps, etc.
+*-sa.json
+*service-account*.json
+*-sdk-*.json
+*-credentials*.json
+*client_secret*.json
+
+# Location-based safety net: no raw JSON belongs directly inside
+# cmd/inventory/ — that's exactly where the SA key landed. This
+# catches the key even if it's renamed to something unexpected.
+/cmd/inventory/*.json
+
+# Generic secret material
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+
+# ----------------------------------------------------------------
+#  Runtime storage tiers — regenerated each run, contain live data
+# ----------------------------------------------------------------
+# NOTE: the "baseline" tier is hand-authored policy and IS tracked.
+#       Only current / daily / archive are ignored — and everywhere
+#       they appear (repo root AND cmd/inventory/), hence the **/.
+**/local/current/
+**/local/daily/
+**/local/archive/
+
+# ----------------------------------------------------------------
+#  Compiled binaries & build output
+# ----------------------------------------------------------------
+/cmd/inventory/inventory
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+*.o
+*.a
+
+# ----------------------------------------------------------------
+#  Go coverage / profiling artifacts
+# ----------------------------------------------------------------
+coverage.out
+coverage.html
+*.prof
+*.cover
+
+# ----------------------------------------------------------------
+#  macOS metadata
+# ----------------------------------------------------------------
+._*
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ----------------------------------------------------------------
+#  Editor / IDE
+# ----------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*~

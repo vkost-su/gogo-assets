@@ -1,0 +1,40 @@
+# golangci-lint configuration for gogo-assets.
+# Conservative, signal-over-noise set aligned with CODING_GUIDE.md.
+# Run: golangci-lint run   (or: make lint)
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck      # unchecked errors
+    - govet         # suspicious constructs
+    - ineffassign   # ineffectual assignments
+    - staticcheck   # broad correctness/simplification set
+    - unused        # unused code
+    - gofmt         # formatting
+    - goimports     # import grouping (stdlib / external / local)
+    - misspell      # common spelling mistakes in comments
+    - bodyclose     # HTTP response bodies must be closed (collectors)
+    - errorlint     # %w wrapping and errors.Is/As correctness
+    - unconvert     # redundant type conversions
+    - wastedassign
+
+linters-settings:
+  goimports:
+    local-prefixes: gogo-assets
+  errcheck:
+    check-type-assertions: true
+  misspell:
+    locale: US
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    # Test files may legitimately ignore errors in setup helpers.
+    - path: _test\.go
+      linters:
+        - errcheck

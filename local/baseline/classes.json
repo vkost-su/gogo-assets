@@ -1,0 +1,90 @@
+{
+  "_comment": "Canonical approved baseline for gogo-assets. Each class matches entities by identity/state fields (exact match, AND-ed) and pins the monitored fields it expects. Bare-string expectations take the field's drift-tag severity; object form {\"value\":\"true\",\"severity\":\"crit\"} overrides it. Parking classes (empty expected) keep inactive/suspended accounts classified so they don't show up as UNCLASSIFIED. Classes are mutually exclusive by design (no CLASS_CONFLICT). Edit freely — this is config, no recompile.",
+
+  "classes": [
+    {
+      "id": "jc-device-macos",
+      "priority": 10,
+      "match": { "os_family": "darwin" },
+      "expected": { "disk_encrypted": "true", "mdm_enrolled": "true" }
+    },
+    {
+      "id": "jc-device-windows",
+      "priority": 10,
+      "match": { "os_family": "windows" },
+      "expected": { "disk_encrypted": "true", "mdm_enrolled": "true" }
+    },
+    {
+      "id": "jc-device-linux",
+      "priority": 10,
+      "match": { "os_family": "linux" },
+      "expected": { "disk_encrypted": "true" }
+    },
+    {
+      "id": "jc-device-ios",
+      "priority": 10,
+      "match": { "os_family": "ios" },
+      "expected": { "mdm_enrolled": "true" }
+    },
+
+    {
+      "id": "sophos-endpoint-macos",
+      "priority": 10,
+      "match": { "os_platform": "macOS" },
+      "expected": { "tamper_protection": "true" }
+    },
+    {
+      "id": "sophos-endpoint-windows",
+      "priority": 10,
+      "match": { "os_platform": "windows" },
+      "expected": { "tamper_protection": "true" }
+    },
+    {
+      "id": "sophos-endpoint-linux",
+      "priority": 10,
+      "match": { "os_platform": "linux" },
+      "expected": { "tamper_protection": "true" }
+    },
+
+    {
+      "id": "gws-admin",
+      "priority": 30,
+      "match": { "suspended": "false", "is_archived": "false", "is_admin": "true" },
+      "expected": {
+        "mfa_enabled": { "value": "true", "severity": "crit" },
+        "mfa_enforced": { "value": "true", "severity": "crit" }
+      }
+    },
+    {
+      "id": "gws-active-user",
+      "priority": 10,
+      "match": { "suspended": "false", "is_archived": "false", "is_admin": "false" },
+      "expected": { "mfa_enabled": "true", "mfa_enforced": "true" }
+    },
+    {
+      "id": "gws-suspended-user",
+      "priority": 5,
+      "match": { "suspended": "true", "is_archived": "false" },
+      "expected": {}
+    },
+
+    {
+      "id": "jc-active-user",
+      "priority": 10,
+      "match": { "activated": "true", "suspended": "false" },
+      "expected": { "mfa_enabled": "true", "password_never_expires": "false" }
+    },
+    {
+      "id": "jc-suspended-user",
+      "priority": 10,
+      "match": { "activated": "true", "suspended": "true" },
+      "expected": {}
+    },
+    {
+      "id": "jc-deactivated-user",
+      "priority": 10,
+      "match": { "activated": "false" },
+      "expected": {}
+    }
+  ]
+}
