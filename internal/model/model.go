@@ -69,6 +69,7 @@ const (
 	ServiceJumpCloud       Service = "JumpCloud"
 	ServiceSophos          Service = "Sophos"
 	ServiceGoogleWorkspace Service = "GoogleWorkspace"
+	ServicePeopleForce     Service = "PeopleForce"
 )
 
 // Meta is the provenance stamped onto every canonical entity.
@@ -82,13 +83,14 @@ type Meta struct {
 // local/current/snapshot.json and sharded per service so the digest can point
 // Claude at a specific slice for drill-down.
 type Snapshot struct {
-	SchemaVersion   string         `json:"schema_version"`
-	RunDate         string         `json:"run_date"`          // YYYY-MM-DD
-	RunTimestamp    time.Time      `json:"run_timestamp_utc"` // exact UTC instant of the run
-	JumpCloud       JumpCloudShard `json:"jumpcloud"`
-	Sophos          SophosShard    `json:"sophos"`
-	GoogleWorkspace GWSShard       `json:"google_workspace"`
-	Provenance      Provenance     `json:"provenance"`
+	SchemaVersion   string           `json:"schema_version"`
+	RunDate         string           `json:"run_date"`          // YYYY-MM-DD
+	RunTimestamp    time.Time        `json:"run_timestamp_utc"` // exact UTC instant of the run
+	JumpCloud       JumpCloudShard   `json:"jumpcloud"`
+	Sophos          SophosShard      `json:"sophos"`
+	GoogleWorkspace GWSShard         `json:"google_workspace"`
+	PeopleForce     PeopleForceShard `json:"peopleforce,omitempty"`
+	Provenance      Provenance       `json:"provenance"`
 }
 
 // Provenance records the concrete API query templates each service collector
@@ -99,6 +101,7 @@ type Provenance struct {
 	JumpCloud       []string `json:"jumpcloud,omitempty"`
 	Sophos          []string `json:"sophos,omitempty"`
 	GoogleWorkspace []string `json:"google_workspace,omitempty"`
+	PeopleForce     []string `json:"peopleforce,omitempty"`
 }
 
 // JumpCloudShard groups the JumpCloud canonical records.
@@ -400,4 +403,49 @@ type GWSDevice struct {
 
 	LastSync     *time.Time `json:"last_sync,omitempty" drift:"volatile"`
 	MACAddresses []string   `json:"mac_addresses,omitempty"`
+}
+
+// ── PeopleForce ──────────────────────────────────────────────────────────────
+
+// PeopleForceShard groups the PeopleForce canonical records.
+//
+// Assets is stored for the Assets dashboard tab and snapshot drill-down. It is
+// not classified in this version — PFAsset carries no monitored fields.
+type PeopleForceShard struct {
+	Assets []PFAsset `json:"assets"`
+}
+
+// PFAsset is one physical asset from PeopleForce Asset Management in canonical
+// form. It records the current assignment (assignee email, issued date) resolved
+// from the assignment history and the employee directory.
+//
+// All fields are volatile or identity — no monitored posture fields exist in
+// this version. Promoting assignment state into findings would require an
+// explicit decision to extend FindingKind or add monitored pointer fields.
+type PFAsset struct {
+	Meta Meta `json:"meta"`
+
+	AssetID      string `json:"asset_id"                drift:"identity"`
+	Name         string `json:"name"                    drift:"identity"`
+	Code         string `json:"code,omitempty"          drift:"identity"`
+	SerialNumber string `json:"serial_number,omitempty" drift:"identity"`
+
+	Category    string `json:"category,omitempty"`
+	Description string `json:"description,omitempty"`
+
+	// Current active assignment (most recent non-returned record).
+	AssignedToEmail string `json:"assigned_to_email,omitempty" drift:"volatile"`
+	AssignedToName  string `json:"assigned_to_name,omitempty"  drift:"volatile"`
+	AssignedToID    int    `json:"assigned_to_id,omitempty"    drift:"volatile"`
+	IssuedOn        string `json:"issued_on,omitempty"         drift:"volatile"` // ISO date
+
+	// Employee context (resolved from the assignee's directory record).
+	Department string `json:"department,omitempty" drift:"volatile"`
+	Position   string `json:"position,omitempty"   drift:"volatile"`
+	Location   string `json:"location,omitempty"   drift:"volatile"`
+
+	IsAssigned bool `json:"is_assigned" drift:"volatile"`
+
+	CreatedAt *time.Time `json:"created_at,omitempty" drift:"volatile"`
+	UpdatedAt *time.Time `json:"updated_at,omitempty" drift:"volatile"`
 }

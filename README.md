@@ -1,7 +1,7 @@
 # gogo-assets
 
 A security asset-inventory CLI written in Go. On each run it collects asset data
-from **Google Workspace**, **JumpCloud**, and **Sophos Central**, correlates it
+from **Google Workspace**, **JumpCloud**, **Sophos Central**, and **PeopleForce**, correlates it
 into a single people-and-devices view, assembles a canonical snapshot, runs a
 drift engine against an approved baseline, and publishes the results to tiered
 local storage and Google Sheets.
@@ -34,8 +34,9 @@ connectors use the same lifecycle instead of growing one-off code paths.
 
 1. **Collect** — pulls users, devices, login activity, and OAuth tokens (Google
    Workspace); systems, directory users, policy statuses, and **SaaS applications**
-   (owner accounts, licenses, usage — JumpCloud AI & SaaS Management); and
-   endpoints, tamper protection, health, alerts, and detections (Sophos Central).
+   (owner accounts, licenses, usage — JumpCloud AI & SaaS Management); endpoints,
+   tamper protection, health, alerts, and detections (Sophos Central); and hardware
+   assets assigned to employees (PeopleForce).
 2. **Correlate** — merges everything into one **email-keyed** view of people and
    joins each physical device's JumpCloud and Sophos records together.
 3. **Assemble** — normalises the raw collector output into a single canonical
@@ -46,7 +47,7 @@ connectors use the same lifecycle instead of growing one-off code paths.
    census.
 5. **Persist** — writes to tiered local storage (current / daily / archive) via
    atomic writes.
-6. **Publish** — writes six Google Sheets tabs and a compact, findings-first
+6. **Publish** — writes seven Google Sheets tabs and a compact, findings-first
    `digest.json` sized to fit a downstream analyst's context budget.
 
 ---
@@ -108,7 +109,7 @@ republishes from that file at any time, **without collecting**:
 ./bin/inventory all --tabs usersall          # collect everything, but write only the UsersAll tab
 ```
 
-`--tabs` takes a comma list of `gw, jc, saas, sophos, usersall, findings` (or
+`--tabs` takes a comma list of `gw, jc, saas, sophos, pf, usersall, findings` (or
 `all`); it filters both the `sheets` command and the auto-write after a normal
 run. A tab with no data is **skipped, never recreated empty**, so a partial run
 or selective publish never clobbers a populated tab.
@@ -142,9 +143,10 @@ stage, follow the cross-links into [The pipeline](#the-pipeline) and the
 |---|---|---|
 | **Go 1.25+** | builds the single binary | yes |
 | **Google Workspace SA + DWD** | the only required collector; also authorises the Sheets write | yes |
-| **A target spreadsheet** | where the six tabs are written | only to publish |
+| **A target spreadsheet** | where the seven tabs are written | only to publish |
 | **JumpCloud API key** | systems, directory users, **SaaS apps** | optional collector |
 | **Sophos Central client id/secret** | endpoints, health, alerts | optional collector |
+| **PeopleForce API key** | hardware assets assigned to employees | optional collector |
 
 Any optional collector with no credentials is **skipped silently** — its tab is
 simply not written. So you can start with just Google Workspace and add the rest
@@ -217,6 +219,7 @@ inventory [target|command] [flags]
 | `inventory gw` | collect Google Workspace only (+ its tab) |
 | `inventory jc` | collect JumpCloud only, **incl. SaaS** (+ JC & SaaS tabs) |
 | `inventory sp` | collect Sophos only (+ its tab) |
+| `inventory pf` | collect PeopleForce only (+ PeopleForce tab) |
 | `inventory sheets` | re-publish tabs from the **last persisted run** — no collection |
 | `inventory help` | full usage reference |
 | `inventory version` | build provenance from the embedded VCS info |
@@ -230,7 +233,7 @@ Targets and flags are **order-independent** (`inventory --json all` ==
 |---|---|---|
 | `--no-sheets` | collection | collect + drift, skip the Sheets write |
 | `--json` | collection | also print the canonical snapshot JSON to stdout |
-| `--tabs <list>` | collection & `sheets` | comma list of `gw,jc,saas,sophos,usersall,findings` (or `all`); write only those |
+| `--tabs <list>` | collection & `sheets` | comma list of `gw,jc,saas,sophos,pf,usersall,findings` (or `all`); write only those |
 | `--approve-baseline` | `all` | anchor the current entity set as the census, skip drift |
 | `--approve-from-current` | — | re-approve the census from the **on-disk** snapshot, then exit (no collection) |
 | `--run-date <YYYY-MM-DD>` | `sheets` | publish a dated `daily/` mirror instead of `current/` |
@@ -245,6 +248,7 @@ the `sheets` command renders from it at any time:
 ```bash
 ./bin/inventory sheets                       # re-push every populated tab
 ./bin/inventory sheets --tabs saas           # rewrite just the SaaS tab
+./bin/inventory sheets --tabs pf             # rewrite just the PeopleForce tab
 ./bin/inventory sheets --run-date 2026-06-15 # re-push a specific day's snapshot
 ./bin/inventory sheets --dry-run             # verify a --tabs/--run-date combo, no API
 ```
@@ -371,11 +375,12 @@ The single most important thing to understand: **the raw collector output fans
 out into two independent views**, built for two different consumers.
 
 ```
-                         ┌─────────────────────────────────────────────┐
-   Google Workspace ─┐   │            raw collector output             │
-   JumpCloud ────────┼──▶│  gworkspace.UserRecord · jumpcloud.System   │
-   Sophos Central ───┘   │  jumpcloud.User · sophos.Endpoint           │
-                         └───────────────┬───────────────┬─────────────┘
+                         ┌──────────────────────────────────────────────────┐
+   Google Workspace ─┐   │              raw collector output                │
+   JumpCloud ────────┼──▶│  gworkspace.UserRecord · jumpcloud.System        │
+   Sophos Central ───┤   │  jumpcloud.User · sophos.Endpoint                │
+   PeopleForce ──────┘   │  peopleforce.Asset                               │
+                         └───────────────┬───────────────┬──────────────────┘
                                          │               │
                   ingest + Finalize()    │               │  assemble.Build()
                                          ▼               ▼
@@ -388,11 +393,11 @@ out into two independent views**, built for two different consumers.
                                     │                             │
                        drives       │                             │  drives
                        Sheets       ▼                             ▼
-                  ┌──────────────────────────┐      ┌──────────────────────────────┐
-                  │ GoogleWorkspace · JumpCloud │   │ classify → drift → digest     │
-                  │ Sophos · UsersAll          │    │ snapshot.json · digest.json   │
-                  └──────────────────────────┘      │ Findings tab                  │
-                                                     └──────────────────────────────┘
+                  ┌────────────────────────────┐    ┌──────────────────────────────┐
+                  │ GoogleWorkspace · JumpCloud │    │ classify → drift → digest     │
+                  │ Sophos · PeopleForce        │    │ snapshot.json · digest.json   │
+                  │ UsersAll                    │    │ Findings tab                  │
+                  └────────────────────────────┘    └──────────────────────────────┘
 ```
 
 - The **inventory view** (`inventory.AssetInventory`) is **people-centric**:
@@ -416,6 +421,7 @@ result into **both** sinks:
 | JumpCloud | `service.JumpCloudModule` → `jumpcloud.Collector.CollectAll` | `[]System`, `map[email]User` | `inv.AddJC` + `src.JCSystems/JCUsers` |
 | JumpCloud SaaS | inside `service.JumpCloudModule` → `jumpcloud.SaaSCollector.CollectAll` | `[]SaaSApp` | `inv.SaaSApps` + `src.JCSaaS` |
 | Sophos | `service.SophosModule` → `sophos.Collector.CollectAll` | `[]Endpoint` | `inv.AddSophos` + `src.Endpoints` |
+| PeopleForce | `service.PeopleForceModule` → `peopleforce.Collector.CollectAll` | `[]Asset` | `inv.AddPeopleForce` + `src.PFAssets` |
 
 A collector with absent credentials is **skipped silently**, not failed — its
 shard is simply empty downstream. The SaaS collector reuses the JumpCloud client
@@ -508,6 +514,7 @@ The fetch/normalise logic for each source lives in its own package; these are th
 | `jumpcloud.System` | `internal/jumpcloud` | one managed endpoint | `SystemID`, `Hostname`, `SerialNumber`, `OwnerEmail`, `DiskEncrypted`, `MDMEnrolled`, `LastContact`, policies, software, hardware |
 | `jumpcloud.User` | `internal/jumpcloud` | one directory user | `Email`, `MFAConfigured`, `TOTPEnabled`, password/account state, `SSHKeys` |
 | `sophos.Endpoint` | `internal/sophos` | one Sophos device | `EndpointID`, `Hostname`, `SerialNumber`, `OwnerLogin` (raw SSO/AD login), `OwnerEmail`, `HealthOverall`, `TamperProtected`, `AlertCount`, `LastSeenAt` |
+| `peopleforce.Asset` | `internal/peopleforce` | one hardware asset | `ID`, `Name`, `Code`, `SerialNumber`, `CategoryName`, `AssignedEmail`, `AssignedName`, `Department`, `Position`, `Location`, `IssuedOn`, `IsAssigned` |
 
 > **Ownership note.** `jumpcloud.System.OwnerEmail` is reliable. `sophos.Endpoint`
 > ownership is not: `OwnerLogin` is the raw `associatedPerson.viaLogin` — often a
@@ -526,6 +533,7 @@ type AssetInventory struct {
     JCSystems       []jumpcloud.System            // raw, for the JumpCloud tab
     JCUsers         map[string]jumpcloud.User      // raw, joined into the JumpCloud tab
     SophosEndpoints []sophos.Endpoint             // raw, for the Sophos tab
+    PFAssets        []peopleforce.Asset            // raw, for the PeopleForce tab
     UnownedDevices  []DevicePair                  // devices with no resolvable owner
     MatchStats      map[string]int                // paired / jc_only / sophos_only / unowned / …
     CollectedAt     time.Time
@@ -537,6 +545,7 @@ type UnifiedUserRecord struct {
     Google    *gworkspace.UserRecord // nil if absent from GWS
     JumpCloud *JCSlice               // .Systems + the matching directory .User
     Sophos    *SophosSlice           // .Endpoints attributed to this person
+    PeopleForce *PFSlice             // .Assets assigned to this person
     Devices   []DevicePair           // physical devices, JC ↔ Sophos joined
 }
 
@@ -669,6 +678,7 @@ tabs. The first column lists the default tab name (overridable via env).
 | **JumpCloud** | `JCSystemRow{System, User}` from `JCSystems` + `JCUsers` | one system (+ owner) | `WriteJC` |
 | **SaaS** | `[]jumpcloud.SaaSApp` from `SaaSApps` | one SaaS application | `WriteSaaS` |
 | **Sophos** | `[]sophos.Endpoint` from `SophosEndpoints` | one endpoint | `WriteSophos` |
+| **PeopleForce** | `[]peopleforce.Asset` from `PFAssets` | one hardware asset | `WritePeopleForce` |
 | **UsersAll** | `[]*UnifiedUserRecord` | one user (cross-source merged) | `WriteMerged` |
 | **Findings** | `[]model.Finding` (drift output) | one finding | `WriteFindings` |
 
@@ -728,10 +738,11 @@ device float to the top):
 | Group | Columns | Source |
 |---|---|---|
 | Identity | Email · Full Name · Org Unit · **Admin** | `Google.Identity` |
-| Coverage | GWS · JC · **SP** | presence of `Google` / `JumpCloud.Systems` / `Sophos.Endpoints` |
+| Coverage | GWS · JC · **SP** · PF | presence of `Google` / `JumpCloud.Systems` / `Sophos.Endpoints` / `PeopleForce.Assets` |
 | GWS | Suspended · 2SV · Last Login | `Google.Identity` / `Google.Auth` |
 | Devices | Count · Match · **OS** · **Enc** · **MDM** · **Last Seen** · Detail | rollups over `Devices` (the JC↔Sophos pairs) |
 | Alerts | Health · Open | worst `Sophos.Endpoints[].HealthOverall` / sum of `AlertCount` |
+| PF Assets | Count · Detail | number of PeopleForce assets; one line per asset (`Category: Name (serial)`) |
 
 The `Devices` group rollups (`OS`, `Enc`, `MDM`, `Last Seen`) summarise per-device
 facts that the wide `Detail` cell spells out line-by-line, so they're sortable and
@@ -769,11 +780,15 @@ that pattern rather than adding their own env parser.
 | `JC_SAAS_USAGE_DAYS` | `30` | SaaS usage window in days (1–90) |
 | `JC_MAX_RPS` | `8` | steady JumpCloud request-rate cap (req/s); smooths bursts so 429s/backoff are rare |
 | `SOPHOS_CLIENT_ID`, `SOPHOS_CLIENT_SECRET` | — | Sophos (skipped if unset) |
+| `PF_API_KEY` | — | PeopleForce API key (skipped if unset) |
+| `PF_BASE_URL` | `https://app.peopleforce.io/api/public/v3` | PeopleForce API base URL |
+| `PF_MAX_RPS` | `5.0` | PeopleForce request-rate cap (req/s) |
 | `SHEETS_SPREADSHEET_ID` | — | target spreadsheet (skipped if unset) |
 | `SHEETS_GW_WORKSHEET` | `GoogleWorkspace` | per-source tab names |
 | `SHEETS_JC_WORKSHEET` | `JumpCloud` | |
 | `SHEETS_SAAS_WORKSHEET` | `SaaS` | JumpCloud SaaS apps tab |
 | `SHEETS_SP_WORKSHEET` | `Sophos` | |
+| `SHEETS_PF_WORKSHEET` | `PeopleForce` | PeopleForce assets tab |
 | `SHEETS_MERGED_WORKSHEET` | `UsersAll` | cross-source summary tab |
 | `SHEETS_FINDINGS_WORKSHEET` | `Findings` | drift-findings tab |
 | `LOCAL_DIR`, `BASELINE_DIR` | `./local`, `./local/baseline` | storage roots |
@@ -890,6 +905,7 @@ cmd/inventory/        CLI entrypoint (flag parsing, orchestration, drift wiring)
 cmd/gw/               standalone Google Workspace service binary
 cmd/jc/               standalone JumpCloud service binary
 cmd/sophos/           standalone Sophos service binary
+cmd/pf/               standalone PeopleForce service binary
 internal/
   model/              canonical snapshot schema + Finding types (single source of truth)
   config/             env/.env loader
@@ -901,6 +917,8 @@ internal/
   jumpcloud/          JumpCloud collector          (+ to_model converter)
                       + SaaS App Management (saas_client/collector/mapper/category/to_model)
   sophos/             Sophos Central collector     (+ to_model converter)
+  peopleforce/        PeopleForce collector        (+ to_model converter)
+                      (model.go, client.go, collector.go, mapper.go, to_model.go)
   inventory/          cross-source unification (email-keyed people + device join)
   assemble/           raw collector output → model.Snapshot (the one seam)
   baseline/           load classes.json + baseline.meta.json
@@ -927,11 +945,11 @@ testable offline with hand-crafted snapshots, and keeps the two views
 to its API. It asks `internal/service.Registry` for the modules selected by the
 target (`gw`, `jc`, `sp`, or `all`), then each module follows the same lifecycle:
 configuration gate → client → collector → typed raw output → inventory ingest →
-canonical source append → API query provenance. Adding Jira, PeopleForce, or any
-other provider should follow that contract: create `internal/<service>/` for the
-client, raw model, mapper, collector, and `to_model` converter; add a module that
-satisfies `service.Module`; register it in `service.DefaultRegistry`; and extend
-the canonical snapshot only where the new service has real entities to store.
+canonical source append → API query provenance. Adding Jira or any other provider should follow that contract: create
+`internal/<service>/` for the client, raw model, mapper, collector, and `to_model`
+converter; add a module that satisfies `service.Module`; register it in
+`service.DefaultRegistry`; and extend the canonical snapshot only where the new
+service has real entities to store.
 Standalone binaries should be thin wrappers around `servicecli.Run`, which owns
 the common `--json` / `--no-persist` flags, config loading, signal handling,
 HTTP/query logs, JSON output, and raw artifact persistence.

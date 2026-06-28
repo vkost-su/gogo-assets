@@ -5,6 +5,7 @@ import (
 
 	"gogo-assets/internal/gworkspace"
 	"gogo-assets/internal/jumpcloud"
+	"gogo-assets/internal/peopleforce"
 	"gogo-assets/internal/sophos"
 )
 
@@ -43,6 +44,24 @@ func (a *AssetInventory) AddJC(systems []jumpcloud.System, users map[string]jump
 			continue
 		}
 		slot.JumpCloud.User = &u
+	}
+}
+
+// AddPeopleForce stores PeopleForce assets and attaches each assigned asset to
+// its owner's user slot (by AssignedEmail) so the UsersAll tab can surface PF
+// coverage without a separate join.
+func (a *AssetInventory) AddPeopleForce(assets []peopleforce.Asset) {
+	a.PFAssets = assets
+	for i := range assets {
+		asset := &assets[i]
+		if asset.AssignedEmail == "" {
+			continue
+		}
+		slot := a.userSlot(asset.AssignedEmail)
+		if slot.PeopleForce == nil {
+			slot.PeopleForce = &PFSlice{}
+		}
+		slot.PeopleForce.Assets = append(slot.PeopleForce.Assets, *asset)
 	}
 }
 

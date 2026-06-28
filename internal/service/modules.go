@@ -9,6 +9,7 @@ import (
 	"gogo-assets/internal/inventory"
 	"gogo-assets/internal/jumpcloud"
 	"gogo-assets/internal/model"
+	"gogo-assets/internal/peopleforce"
 	"gogo-assets/internal/sophos"
 )
 
@@ -174,5 +175,60 @@ func (m SophosModule) AppendSources(src *assemble.Sources, r Result) error {
 	}
 	src.Endpoints = out.Endpoints
 	src.SophosQueries = out.Queries
+	return nil
+}
+
+// PeopleForceModule wires PeopleForce Asset Management into the uniform service
+// contract. Missing credentials skip the module silently.
+type PeopleForceModule struct{}
+
+func (PeopleForceModule) Key() Key                    { return KeyPeopleForce }
+func (PeopleForceModule) DisplayName() string         { return "PeopleForce" }
+func (PeopleForceModule) ModelService() model.Service { return model.ServicePeopleForce }
+func (PeopleForceModule) Required() bool              { return false }
+func (PeopleForceModule) RawArtifactName() string     { return "pf_raw.json" }
+func (PeopleForceModule) MissingConfigMessage() string {
+	return "PF_API_KEY not set — skipping PeopleForce"
+}
+func (PeopleForceModule) Configured(s config.Settings) bool { return s.PeopleForce.APIKey != "" }
+
+func (m PeopleForceModule) Collect(ctx context.Context, rt Runtime) (Result, error) {
+	client := peopleforce.New(
+		rt.Settings.PeopleForce.APIKey,
+		rt.Settings.PeopleForce.BaseURL,
+		rt.Settings.PeopleForce.MaxRPS,
+		rt.HTTPCounter,
+	)
+	out := &peopleforce.Output{}
+	c := peopleforce.NewCollector(client, out)
+	if err := c.CollectAll(ctx); err != nil {
+		return Result{}, err
+	}
+	return Result{
+		Key:         m.Key(),
+		Service:     m.ModelService(),
+		DisplayName: m.DisplayName(),
+		Output:      out,
+		Queries:     out.Queries,
+		Counts:      map[string]int{"assets": len(out.Assets)},
+	}, nil
+}
+
+func (m PeopleForceModule) IngestInventory(inv *inventory.AssetInventory, r Result) error {
+	out, err := outputAs[peopleforce.Output](m, r)
+	if err != nil {
+		return err
+	}
+	inv.AddPeopleForce(out.Assets)
+	return nil
+}
+
+func (m PeopleForceModule) AppendSources(src *assemble.Sources, r Result) error {
+	out, err := outputAs[peopleforce.Output](m, r)
+	if err != nil {
+		return err
+	}
+	src.PFAssets = out.Assets
+	src.PFQueries = out.Queries
 	return nil
 }

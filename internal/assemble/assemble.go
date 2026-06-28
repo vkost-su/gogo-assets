@@ -19,10 +19,11 @@ import (
 	"gogo-assets/internal/gworkspace"
 	"gogo-assets/internal/jumpcloud"
 	"gogo-assets/internal/model"
+	"gogo-assets/internal/peopleforce"
 	"gogo-assets/internal/sophos"
 )
 
-// Sources bundles the raw results from the three collectors.
+// Sources bundles the raw results from the four collectors.
 //
 // Any field may be empty/nil when its collector was skipped (missing
 // credentials or a partial target); the corresponding canonical shard is then
@@ -33,18 +34,20 @@ type Sources struct {
 	JCUsers   map[string]jumpcloud.User // keyed by email
 	JCSaaS    []jumpcloud.SaaSApp       // JumpCloud SaaS App Management
 	Endpoints []sophos.Endpoint
+	PFAssets  []peopleforce.Asset // PeopleForce Asset Management
 
 	// Concrete API query templates each collector issued this run, carried into
 	// the snapshot's provenance block. Empty when a collector was skipped.
-	GWSQueries []string
-	JCQueries  []string
+	GWSQueries    []string
+	JCQueries     []string
 	SophosQueries []string
+	PFQueries     []string
 }
 
-// SourcesFrom builds a Sources from the typed outputs of the three collectors.
+// SourcesFrom builds a Sources from the typed outputs of the four collectors.
 // Nil outputs (skipped collectors) produce empty/nil fields, which Build
 // handles gracefully by producing empty shards.
-func SourcesFrom(gws *gworkspace.Output, jc *jumpcloud.Output, sp *sophos.Output) Sources {
+func SourcesFrom(gws *gworkspace.Output, jc *jumpcloud.Output, sp *sophos.Output, pf *peopleforce.Output) Sources {
 	var src Sources
 	if gws != nil {
 		src.GWS = gws.Records
@@ -59,6 +62,10 @@ func SourcesFrom(gws *gworkspace.Output, jc *jumpcloud.Output, sp *sophos.Output
 	if sp != nil {
 		src.Endpoints = sp.Endpoints
 		src.SophosQueries = sp.Queries
+	}
+	if pf != nil {
+		src.PFAssets = pf.Assets
+		src.PFQueries = pf.Queries
 	}
 	return src
 }
@@ -78,10 +85,12 @@ func Build(src Sources, runTimestamp time.Time, runDate string) model.Snapshot {
 		JumpCloud:       buildJumpCloud(src, meta),
 		Sophos:          buildSophos(src, meta),
 		GoogleWorkspace: buildGWS(src, meta),
+		PeopleForce:     buildPeopleForce(src, meta),
 		Provenance: model.Provenance{
 			JumpCloud:       src.JCQueries,
 			Sophos:          src.SophosQueries,
 			GoogleWorkspace: src.GWSQueries,
+			PeopleForce:     src.PFQueries,
 		},
 	}
 }
@@ -138,6 +147,17 @@ func buildSophos(src Sources, meta model.Meta) model.SophosShard {
 		Endpoints:     endpoints,
 		AccountHealth: sophos.ToAccountHealth(src.Endpoints, meta),
 	}
+}
+
+// buildPeopleForce converts PeopleForce assets into the canonical shard.
+// Assets are sorted by AssetID for deterministic output.
+func buildPeopleForce(src Sources, meta model.Meta) model.PeopleForceShard {
+	assets := make([]model.PFAsset, 0, len(src.PFAssets))
+	for _, a := range src.PFAssets {
+		assets = append(assets, peopleforce.ToAsset(a, meta))
+	}
+	sort.Slice(assets, func(i, j int) bool { return assets[i].AssetID < assets[j].AssetID })
+	return model.PeopleForceShard{Assets: assets}
 }
 
 // buildGWS converts each user record → identity and flattens every record's

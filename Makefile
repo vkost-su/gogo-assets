@@ -9,6 +9,7 @@ COVER_FILE  := coverage.out
 GW_BINARY  := gw
 JC_BINARY  := jc
 SP_BINARY  := sophos
+PF_BINARY  := pf
 
 GO          ?= go
 GOFLAGS     ?=
@@ -26,7 +27,7 @@ build:
 	@mkdir -p $(BIN_DIR)
 	$(GO) build $(GOFLAGS) -o $(BIN_DIR)/$(BINARY) $(CMD_PKG)
 
-## build-all: compile all four binaries (inventory gw jc sophos) into bin/
+## build-all: compile all binaries (inventory gw jc sophos pf) into bin/
 .PHONY: build-all
 build-all:
 	@mkdir -p $(BIN_DIR)
@@ -34,6 +35,7 @@ build-all:
 	$(GO) build $(GOFLAGS) -o $(BIN_DIR)/$(GW_BINARY) ./cmd/gw
 	$(GO) build $(GOFLAGS) -o $(BIN_DIR)/$(JC_BINARY) ./cmd/jc
 	$(GO) build $(GOFLAGS) -o $(BIN_DIR)/$(SP_BINARY) ./cmd/sophos
+	$(GO) build $(GOFLAGS) -o $(BIN_DIR)/$(PF_BINARY) ./cmd/pf
 
 ## run: build and run a full collection (all sources, drift, sheets)
 .PHONY: run

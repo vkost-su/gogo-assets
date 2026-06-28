@@ -21,11 +21,12 @@ const (
 	tabJC       tabKey = "jc"
 	tabSaaS     tabKey = "saas"
 	tabSophos   tabKey = "sophos"
+	tabPF       tabKey = "pf"
 	tabUsersAll tabKey = "usersall"
 	tabFindings tabKey = "findings"
 )
 
-var allTabKeys = []tabKey{tabGW, tabJC, tabSaaS, tabSophos, tabUsersAll, tabFindings}
+var allTabKeys = []tabKey{tabGW, tabJC, tabSaaS, tabSophos, tabPF, tabUsersAll, tabFindings}
 
 var validTab = func() map[tabKey]bool {
 	m := make(map[tabKey]bool, len(allTabKeys))
@@ -53,7 +54,7 @@ func parseTabs(s string) (map[tabKey]bool, error) {
 			return nil, nil
 		}
 		if !validTab[k] {
-			return nil, fmt.Errorf("unknown tab %q (valid: gw, jc, saas, sophos, usersall, findings, all)", part)
+			return nil, fmt.Errorf("unknown tab %q (valid: gw, jc, saas, sophos, pf, usersall, findings, all)", part)
 		}
 		out[k] = true
 	}
@@ -64,7 +65,7 @@ func parseTabs(s string) (map[tabKey]bool, error) {
 }
 
 // targetTabs maps a collection target to the tabs the auto-write path may write:
-// gw→GW, jc→JC+SaaS, sp→Sophos, all→everything.
+// gw→GW, jc→JC+SaaS, sp→Sophos, pf→PF, all→everything.
 func targetTabs(target string) func(tabKey) bool {
 	var set map[tabKey]bool
 	switch target {
@@ -74,8 +75,10 @@ func targetTabs(target string) func(tabKey) bool {
 		set = map[tabKey]bool{tabJC: true, tabSaaS: true}
 	case "sp":
 		set = map[tabKey]bool{tabSophos: true}
+	case "pf":
+		set = map[tabKey]bool{tabPF: true}
 	default: // "all"
-		set = map[tabKey]bool{tabGW: true, tabJC: true, tabSaaS: true, tabSophos: true, tabUsersAll: true, tabFindings: true}
+		set = map[tabKey]bool{tabGW: true, tabJC: true, tabSaaS: true, tabSophos: true, tabPF: true, tabUsersAll: true, tabFindings: true}
 	}
 	return func(k tabKey) bool { return set[k] }
 }
@@ -102,6 +105,7 @@ func buildSheetTabs(ctx context.Context, svc *sheets.Service, s config.Settings,
 		{tabJC, s.Sheets.JCWorksheet, len(inv.JCSystems) > 0, func() error { return sheets.WriteJC(ctx, svc, s.Sheets.JCWorksheet, inv) }},
 		{tabSaaS, s.Sheets.SaaSWorksheet, len(inv.SaaSApps) > 0, func() error { return sheets.WriteSaaS(ctx, svc, s.Sheets.SaaSWorksheet, inv) }},
 		{tabSophos, s.Sheets.SophosWorksheet, len(inv.SophosEndpoints) > 0, func() error { return sheets.WriteSophos(ctx, svc, s.Sheets.SophosWorksheet, inv) }},
+		{tabPF, s.Sheets.PFWorksheet, len(inv.PFAssets) > 0, func() error { return sheets.WritePeopleForce(ctx, svc, s.Sheets.PFWorksheet, inv) }},
 		{tabUsersAll, s.Sheets.MergedWorksheet, len(inv.Users) > 0, func() error { return sheets.WriteMerged(ctx, svc, s.Sheets.MergedWorksheet, inv) }},
 		{tabFindings, s.Sheets.FindingsWorksheet, len(findings) > 0, func() error { return sheets.WriteFindings(ctx, svc, s.Sheets.FindingsWorksheet, findings) }},
 	}

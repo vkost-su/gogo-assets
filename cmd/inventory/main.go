@@ -1,7 +1,7 @@
-// Command inventory collects asset data from Google Workspace, JumpCloud, and
-// Sophos Central, assembles a canonical snapshot, runs the drift engine against
-// the approved baseline, and writes the results to a local snapshot store and
-// to Google Sheets.
+// Command inventory collects asset data from Google Workspace, JumpCloud,
+// Sophos Central, and PeopleForce, assembles a canonical snapshot, runs the
+// drift engine against the approved baseline, and writes the results to a
+// local snapshot store and to Google Sheets.
 //
 // Usage:
 //
@@ -12,6 +12,7 @@
 //	gw       Google Workspace only
 //	jc       JumpCloud only
 //	sp       Sophos only
+//	pf       PeopleForce only
 //	all      all of the above (default)
 //	sheets   publish the persisted snapshot to Google Sheets (no collection)
 //	help     print usage and exit
@@ -21,7 +22,7 @@
 //
 //	--json              print the canonical snapshot JSON to stdout
 //	--no-sheets         skip the Google Sheets write
-//	--tabs              comma-separated tabs to write (gw,jc,saas,sophos,usersall,findings)
+//	--tabs              comma-separated tabs to write (gw,jc,saas,sophos,pf,usersall,findings)
 //	--run-date          (sheets) publish a dated daily mirror instead of current
 //	--dry-run           (sheets) log which tabs would be written; touch no API
 //	--approve-baseline  write the baseline census from this run and skip drift
@@ -85,7 +86,7 @@ func run(args []string) error {
 	for _, a := range args {
 		if !targetSet {
 			switch a {
-			case "gw", "jc", "sp", "all":
+			case "gw", "jc", "sp", "pf", "all":
 				target, targetSet = a, true
 				continue
 			case "sheets":
@@ -102,7 +103,7 @@ func run(args []string) error {
 	fs.Usage = func() { printUsage(os.Stdout) }
 	emitJSON := fs.Bool("json", false, "print the canonical snapshot JSON to stdout")
 	noSheets := fs.Bool("no-sheets", false, "skip the Google Sheets write")
-	tabsFlag := fs.String("tabs", "", "comma-separated tabs to write (gw,jc,saas,sophos,usersall,findings); default all")
+	tabsFlag := fs.String("tabs", "", "comma-separated tabs to write (gw,jc,saas,sophos,pf,usersall,findings); default all")
 	runDateFlag := fs.String("run-date", "", "(sheets) publish the daily/<YYYY-MM-DD>/inventory.json mirror instead of current")
 	dryRun := fs.Bool("dry-run", false, "(sheets) log which tabs would be written without touching the Google API")
 	approve := fs.Bool("approve-baseline", false, "write the baseline census from this run and skip drift")
@@ -117,7 +118,7 @@ func run(args []string) error {
 		return fmt.Errorf("parse args: %w", err)
 	}
 	if fs.NArg() > 0 {
-		return fmt.Errorf("unexpected argument %q (targets: gw|jc|sp|all|sheets; try `inventory help`)", fs.Arg(0))
+		return fmt.Errorf("unexpected argument %q (targets: gw|jc|sp|pf|all|sheets; try `inventory help`)", fs.Arg(0))
 	}
 
 	// --run-date and --dry-run only mean something for the `sheets` command.
@@ -210,7 +211,8 @@ func run(args []string) error {
 	doneCollect(
 		"users", len(inv.Users),
 		"jc_systems", len(inv.JCSystems),
-		"sophos_endpoints", len(inv.SophosEndpoints))
+		"sophos_endpoints", len(inv.SophosEndpoints),
+		"pf_assets", len(inv.PFAssets))
 
 	log.Info("http requests", httpCounter.Snapshot().LogArgs()...)
 
@@ -235,7 +237,8 @@ func run(args []string) error {
 		"saas_apps", len(snap.JumpCloud.SaaS),
 		"sophos_endpoints", len(snap.Sophos.Endpoints),
 		"gws_identity", len(snap.GoogleWorkspace.Identity),
-		"gws_devices", len(snap.GoogleWorkspace.Devices))
+		"gws_devices", len(snap.GoogleWorkspace.Devices),
+		"pf_assets", len(snap.PeopleForce.Assets))
 
 	if *emitJSON {
 		if err := json.NewEncoder(os.Stdout).Encode(snap); err != nil {
@@ -356,8 +359,8 @@ func run(args []string) error {
 // printUsage writes the structured CLI reference to w. It is shared by the
 // `help` command and the flag package's usage hook so the two never diverge.
 func printUsage(w io.Writer) {
-	const usage = `inventory — collect Google Workspace, JumpCloud & Sophos assets, run drift,
-publish to Google Sheets.
+	const usage = `inventory — collect Google Workspace, JumpCloud, Sophos & PeopleForce assets,
+run drift, publish to Google Sheets.
 
 Usage:
   inventory [target|command] [flags]
@@ -366,6 +369,7 @@ Targets (collect, then auto-publish the matching tabs):
   gw        Google Workspace only
   jc        JumpCloud only (incl. SaaS App Management)
   sp        Sophos Central only
+  pf        PeopleForce only (hardware assets assigned to employees)
   all       all of the above + drift engine (default)
 
 Commands:
@@ -388,6 +392,7 @@ Flags:
   jc         JumpCloud systems
   saas       JumpCloud SaaS App Management
   sophos     Sophos endpoints
+  pf         PeopleForce assets
   usersall   cross-source per-user summary
   findings   drift-engine findings
 
@@ -395,9 +400,11 @@ Examples:
   inventory all                       full run: collect, correlate, drift, sheets
   inventory all --no-sheets           collect + drift, skip Sheets
   inventory gw                        collect Google Workspace only
+  inventory pf                        collect PeopleForce assets only
   inventory all --json --no-sheets    print the canonical snapshot to stdout
   inventory all --approve-baseline    anchor the census for NEW/GONE detection
   inventory sheets                    republish every populated tab from the last run
+  inventory sheets --tabs pf          rewrite only the PeopleForce tab
   inventory sheets --tabs jc,saas     rewrite only those two tabs
   inventory sheets --run-date 2026-06-15   republish a specific dated snapshot
   inventory sheets --dry-run          show which tabs would be written
@@ -474,6 +481,7 @@ func logProvenance(log *slog.Logger, p model.Provenance) {
 		{"google_workspace", p.GoogleWorkspace},
 		{"jumpcloud", p.JumpCloud},
 		{"sophos", p.Sophos},
+		{"peopleforce", p.PeopleForce},
 	} {
 		if len(svc.queries) > 0 {
 			log.Info("api queries", "service", svc.name, "count", len(svc.queries), "endpoints", svc.queries)

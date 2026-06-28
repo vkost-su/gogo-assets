@@ -305,6 +305,17 @@ var mergedColumns = []Column[*inventory.UnifiedUserRecord]{
 		},
 		AlertYellow: func(v string) bool { return v == "—" },
 	},
+	{
+		Group:  "Coverage",
+		Header: "PF",
+		Extract: func(r *inventory.UnifiedUserRecord) string {
+			if r.PeopleForce != nil && len(r.PeopleForce.Assets) > 0 {
+				return "✓"
+			}
+			return "—"
+		},
+		AlertYellow: func(v string) bool { return v == "—" },
+	},
 
 	// ── GWS posture ───────────────────────────────────────────────────────────
 	col("GWS", "Suspended", func(r *inventory.UnifiedUserRecord) string {
@@ -358,6 +369,37 @@ var mergedColumns = []Column[*inventory.UnifiedUserRecord]{
 		Header:  "Detail",
 		Extract: devicesDetail,
 		Wrap:    true,
+	},
+
+	// ── PeopleForce assets ────────────────────────────────────────────────────
+	col("PF Assets", "Count", func(r *inventory.UnifiedUserRecord) string {
+		if r.PeopleForce == nil || len(r.PeopleForce.Assets) == 0 {
+			return ""
+		}
+		return fmt.Sprintf("%d", len(r.PeopleForce.Assets))
+	}),
+	{
+		Group:  "PF Assets",
+		Header: "Detail",
+		Extract: func(r *inventory.UnifiedUserRecord) string {
+			if r.PeopleForce == nil {
+				return ""
+			}
+			lines := make([]string, 0, len(r.PeopleForce.Assets))
+			for _, a := range r.PeopleForce.Assets {
+				label := a.Name
+				if a.CategoryName != "" {
+					label = a.CategoryName + ": " + a.Name
+				}
+				if a.SerialNumber != "" {
+					label += " (" + a.SerialNumber + ")"
+				}
+				lines = append(lines, label)
+			}
+			sort.Strings(lines)
+			return strings.Join(lines, "\n")
+		},
+		Wrap: true,
 	},
 
 	// ── Alerts ────────────────────────────────────────────────────────────────

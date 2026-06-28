@@ -8,6 +8,7 @@ import (
 
 	"gogo-assets/internal/gworkspace"
 	"gogo-assets/internal/jumpcloud"
+	"gogo-assets/internal/peopleforce"
 	"gogo-assets/internal/sophos"
 )
 
@@ -20,6 +21,11 @@ type JCSlice struct {
 // SophosSlice is Sophos data attached to a user in the unified view.
 type SophosSlice struct {
 	Endpoints []sophos.Endpoint `json:"endpoints,omitempty"`
+}
+
+// PFSlice is PeopleForce data attached to a user in the unified view.
+type PFSlice struct {
+	Assets []peopleforce.Asset `json:"assets,omitempty"`
 }
 
 // DevicePair links one physical device to its JC and/or Sophos record.
@@ -35,25 +41,27 @@ type DevicePair struct {
 
 // UnifiedUserRecord is one row of the inventory, keyed by email.
 type UnifiedUserRecord struct {
-	Email     string                 `json:"email"`
-	Google    *gworkspace.UserRecord `json:"google,omitempty"`
-	JumpCloud *JCSlice               `json:"jumpcloud,omitempty"`
-	Sophos    *SophosSlice           `json:"sophos,omitempty"`
-	Devices   []DevicePair           `json:"devices,omitempty"`
+	Email       string                 `json:"email"`
+	Google      *gworkspace.UserRecord `json:"google,omitempty"`
+	JumpCloud   *JCSlice               `json:"jumpcloud,omitempty"`
+	Sophos      *SophosSlice           `json:"sophos,omitempty"`
+	PeopleForce *PFSlice               `json:"peopleforce,omitempty"`
+	Devices     []DevicePair           `json:"devices,omitempty"`
 }
 
 // AssetInventory is the top-level snapshot produced by Run.
 //
-// Users is the merged-by-email view. JCSystems, JCUsers, SophosEndpoints hold
-// the raw per-source results so the per-source sheet tabs can be written
-// without re-fetching. UnownedDevices captures pairs whose owner could not be
-// resolved to any known email.
+// Users is the merged-by-email view. JCSystems, JCUsers, SophosEndpoints,
+// and PFAssets hold the raw per-source results so the per-source sheet tabs
+// can be written without re-fetching. UnownedDevices captures pairs whose
+// owner could not be resolved to any known email.
 type AssetInventory struct {
 	Users           map[string]*UnifiedUserRecord `json:"users"`
 	JCSystems       []jumpcloud.System            `json:"jc_systems,omitempty"`
 	JCUsers         map[string]jumpcloud.User     `json:"jc_users,omitempty"`
 	SaaSApps        []jumpcloud.SaaSApp           `json:"saas_apps,omitempty"`
 	SophosEndpoints []sophos.Endpoint             `json:"sophos_endpoints,omitempty"`
+	PFAssets        []peopleforce.Asset           `json:"pf_assets,omitempty"`
 	UnownedDevices  []DevicePair                  `json:"unowned_devices,omitempty"`
 	MatchStats      map[string]int                `json:"match_stats,omitempty"`
 	CollectedAt     time.Time                     `json:"collected_at"`

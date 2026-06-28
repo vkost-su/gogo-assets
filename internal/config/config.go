@@ -34,6 +34,14 @@ type Sophos struct {
 	ClientSecret string
 }
 
+// PeopleForce holds PeopleForce API credentials.
+// APIKey may be empty — the collector is then skipped.
+type PeopleForce struct {
+	APIKey  string
+	BaseURL string  // optional override; defaults to the production endpoint
+	MaxRPS  float64 // steady request-rate cap (0 ⇒ client default)
+}
+
 // Google holds Google Workspace service-account credentials.
 type Google struct {
 	SAJSONPath string // absolute path; existence is verified by Load
@@ -51,6 +59,7 @@ type Sheets struct {
 	SophosWorksheet   string
 	MergedWorksheet   string
 	FindingsWorksheet string // drift-engine findings tab
+	PFWorksheet       string // PeopleForce assets tab
 }
 
 // Settings is the top-level configuration consumed by main.
@@ -59,6 +68,7 @@ type Settings struct {
 	JumpCloud        JumpCloud
 	Sophos           Sophos
 	Google           Google
+	PeopleForce      PeopleForce
 	Sheets           Sheets
 	LocalDir         string // root of the storage tiers (baseline/current/daily/archive)
 	BaselineDir      string // approved baseline anchor; defaults to LocalDir/baseline
@@ -73,9 +83,10 @@ type Settings struct {
 // loader always parses every known setting so defaults stay consistent across
 // binaries; these flags only decide which missing credentials are fatal.
 type LoadOptions struct {
-	RequireGoogle    bool
-	RequireJumpCloud bool
-	RequireSophos    bool
+	RequireGoogle      bool
+	RequireJumpCloud   bool
+	RequireSophos      bool
+	RequirePeopleForce bool
 }
 
 // Load reads .env (if present) and the OS environment, then assembles Settings.
@@ -162,11 +173,16 @@ func LoadWithOptions(envPath string, opts LoadOptions) (Settings, error) {
 	if err != nil {
 		return Settings{}, err
 	}
+	pf, err := loadPeopleForce(optional, opts.RequirePeopleForce)
+	if err != nil {
+		return Settings{}, err
+	}
 
 	return Settings{
-		JumpCloud: jc,
-		Sophos:    sp,
-		Google:    google,
+		JumpCloud:   jc,
+		Sophos:      sp,
+		Google:      google,
+		PeopleForce: pf,
 		Sheets: Sheets{
 			SpreadsheetID:     optional("SHEETS_SPREADSHEET_ID", ""),
 			Worksheet:         optional("SHEETS_GW_WORKSHEET", "GoogleWorkspace"),
@@ -175,6 +191,7 @@ func LoadWithOptions(envPath string, opts LoadOptions) (Settings, error) {
 			SophosWorksheet:   optional("SHEETS_SP_WORKSHEET", "Sophos"),
 			MergedWorksheet:   optional("SHEETS_MERGED_WORKSHEET", "UsersAll"),
 			FindingsWorksheet: optional("SHEETS_FINDINGS_WORKSHEET", "Findings"),
+			PFWorksheet:       optional("SHEETS_PF_WORKSHEET", "PeopleForce"),
 		},
 		LocalDir:         localDir,
 		BaselineDir:      baselineDir,
@@ -254,6 +271,25 @@ func loadSophos(
 		}
 	}
 	return Sophos{ClientID: clientID, ClientSecret: clientSecret}, nil
+}
+
+func loadPeopleForce(
+	optional func(string, string) string,
+	require bool,
+) (PeopleForce, error) {
+	apiKey := optional("PF_API_KEY", "")
+	if require && apiKey == "" {
+		return PeopleForce{}, fmt.Errorf("%w: PF_API_KEY", ErrMissing)
+	}
+	pfMaxRPS, err := strconv.ParseFloat(optional("PF_MAX_RPS", "0"), 64)
+	if err != nil || pfMaxRPS < 0 {
+		return PeopleForce{}, fmt.Errorf("PF_MAX_RPS must be a non-negative number: %q", optional("PF_MAX_RPS", "0"))
+	}
+	return PeopleForce{
+		APIKey:  apiKey,
+		BaseURL: optional("PF_BASE_URL", ""),
+		MaxRPS:  pfMaxRPS,
+	}, nil
 }
 
 // EnvLookup performs the same .env discovery as Load — ./.env in the working

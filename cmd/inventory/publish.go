@@ -79,6 +79,7 @@ func publishSheets(ctx context.Context, log *slog.Logger, s config.Settings, sel
 		"jc_systems", len(inv.JCSystems),
 		"saas_apps", len(inv.SaaSApps),
 		"sophos_endpoints", len(inv.SophosEndpoints),
+		"pf_assets", len(inv.PFAssets),
 		"findings", len(findings))
 
 	// Dry-run: walk every gate and log the verdict, but never open the Sheets

@@ -46,7 +46,7 @@ type Client struct {
 	apiKey  string
 	orgID   string
 	http    *http.Client
-	limiter *rate.Limiter     // shared across all goroutines; smooths the request rate
+	limiter *rate.Limiter      // shared across all goroutines; smooths the request rate
 	queries *apiquery.Recorder // records the concrete endpoint templates issued
 }
 

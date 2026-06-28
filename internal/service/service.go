@@ -28,6 +28,7 @@ const (
 	KeyGoogleWorkspace Key = "gw"
 	KeyJumpCloud       Key = "jc"
 	KeySophos          Key = "sp"
+	KeyPeopleForce     Key = "pf"
 )
 
 // Runtime carries shared dependencies every module needs during collection.
@@ -74,6 +75,7 @@ func DefaultRegistry() Registry {
 		GoogleWorkspaceModule{},
 		JumpCloudModule{},
 		SophosModule{},
+		PeopleForceModule{},
 	}
 }
 
