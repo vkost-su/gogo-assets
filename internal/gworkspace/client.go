@@ -4,14 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"sync"
 
+	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	admin "google.golang.org/api/admin/directory/v1"
 	reports "google.golang.org/api/admin/reports/v1"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
+
+	"gogo-assets/internal/apiquery"
+	"gogo-assets/internal/httpstat"
 )
 
 // Required OAuth scopes for the service-account principal under domain-wide delegation.
@@ -30,15 +35,17 @@ type Client struct {
 	adminEmail string
 	customerID string
 
-	mu        sync.Mutex
-	directory *admin.Service
-	reports   *reports.Service
-	credsJSON []byte
+	queries     *apiquery.Recorder // records the concrete endpoint templates issued
+	mu          sync.Mutex
+	directory   *admin.Service
+	reports     *reports.Service
+	credsJSON   []byte
+	httpCounter *httpstat.Counter
 }
 
 // New constructs an unconnected client. Call EnsureClients (or any list method)
 // before use — they lazily build the API services.
-func New(saJSONPath, adminEmail, customerID string) (*Client, error) {
+func New(saJSONPath, adminEmail, customerID string, counter *httpstat.Counter) (*Client, error) {
 	data, err := os.ReadFile(saJSONPath)
 	if err != nil {
 		return nil, fmt.Errorf("read SA JSON: %w", err)
@@ -47,11 +54,17 @@ func New(saJSONPath, adminEmail, customerID string) (*Client, error) {
 		customerID = "my_customer"
 	}
 	return &Client{
-		adminEmail: adminEmail,
-		customerID: customerID,
-		credsJSON:  data,
+		adminEmail:  adminEmail,
+		customerID:  customerID,
+		credsJSON:   data,
+		httpCounter: counter,
+		queries:     apiquery.New(),
 	}, nil
 }
+
+// Queries returns the concrete API query templates this client issued, sorted.
+// It is the Google Workspace half of the run's per-service provenance manifest.
+func (c *Client) Queries() []string { return c.queries.Queries() }
 
 // EnsureClients builds the directory + reports services with DWD impersonation.
 // Idempotent — subsequent calls are no-ops.
@@ -70,15 +83,31 @@ func (c *Client) EnsureClients(ctx context.Context) error {
 
 	ts := cfg.TokenSource(ctx)
 
+	// Build the service options. When a counter is set, we drive auth through an
+	// explicit *http.Client whose transport both injects the OAuth token and
+	// tallies every response; otherwise the SDK builds its own from the token
+	// source. WithHTTPClient is exclusive with WithTokenSource, so it's one path
+	// or the other.
+	var opts []option.ClientOption
+	if c.httpCounter != nil {
+		hc := &http.Client{Transport: &oauth2.Transport{
+			Source: ts,
+			Base:   c.httpCounter.Wrap(http.DefaultTransport),
+		}}
+		opts = []option.ClientOption{option.WithHTTPClient(hc)}
+	} else {
+		opts = []option.ClientOption{option.WithTokenSource(ts)}
+	}
+
 	if c.directory == nil {
-		s, err := admin.NewService(ctx, option.WithTokenSource(ts))
+		s, err := admin.NewService(ctx, opts...)
 		if err != nil {
 			return fmt.Errorf("build directory service: %w", err)
 		}
 		c.directory = s
 	}
 	if c.reports == nil {
-		s, err := reports.NewService(ctx, option.WithTokenSource(ts))
+		s, err := reports.NewService(ctx, opts...)
 		if err != nil {
 			return fmt.Errorf("build reports service: %w", err)
 		}
@@ -95,6 +124,7 @@ func (c *Client) ListUsers(ctx context.Context) ([]*admin.User, error) {
 	if err := c.EnsureClients(ctx); err != nil {
 		return nil, err
 	}
+	c.queries.Record("GET /admin/directory/v1/users")
 	var out []*admin.User
 	call := c.directory.Users.List().Customer(c.customerID).MaxResults(500).Context(ctx)
 	err := call.Pages(ctx, func(resp *admin.Users) error {
@@ -112,6 +142,7 @@ func (c *Client) ListEndpointDevices(ctx context.Context) ([]*admin.MobileDevice
 	if err := c.EnsureClients(ctx); err != nil {
 		return nil, err
 	}
+	c.queries.Record("GET /admin/directory/v1/customer/{customerId}/devices/mobile")
 	var out []*admin.MobileDevice
 	call := c.directory.Mobiledevices.List(c.customerID).MaxResults(100).Context(ctx)
 	err := call.Pages(ctx, func(resp *admin.MobileDevices) error {
@@ -130,6 +161,7 @@ func (c *Client) ListUserTokens(ctx context.Context, userEmail string) ([]*admin
 	if err := c.EnsureClients(ctx); err != nil {
 		return nil, err
 	}
+	c.queries.Record("GET /admin/directory/v1/users/{userKey}/tokens")
 	resp, err := c.directory.Tokens.List(userEmail).Context(ctx).Do()
 	if err != nil {
 		if isHTTPStatus(err, 404) {
@@ -155,6 +187,7 @@ func (c *Client) listActivities(ctx context.Context, userEmail, app, startTime s
 	if err := c.EnsureClients(ctx); err != nil {
 		return nil, err
 	}
+	c.queries.Record("GET /admin/reports/v1/activity/users/{userKey}/applications/" + app)
 	call := c.reports.Activities.List(userEmail, app).
 		StartTime(startTime).
 		MaxResults(1000).

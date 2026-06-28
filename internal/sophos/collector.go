@@ -5,15 +5,26 @@ import (
 	"errors"
 	"time"
 
+	"gogo-assets/internal/collector"
 	"gogo-assets/internal/logging"
 )
 
+// Compile-time check that Collector satisfies the collector.Collector interface.
+var _ collector.Collector = (*Collector)(nil)
+
 const _detectionDays = 30
+
+// Output holds the results of a completed Sophos collection.
+type Output struct {
+	Endpoints []Endpoint `json:"endpoints"`
+	Queries   []string   `json:"queries"` // concrete API query templates issued this run
+}
 
 // Collector orchestrates the 6-step Sophos collection pipeline and produces
 // fully-enriched Endpoint records.
 type Collector struct {
 	client *Client
+	out    *Output
 	log    interface {
 		Info(msg string, args ...any)
 		Warn(msg string, args ...any)
@@ -21,30 +32,39 @@ type Collector struct {
 	}
 }
 
-// NewCollector wraps a bootstrapped Client. The client must have had Bootstrap
-// called on it already, otherwise the first list call will fail.
-func NewCollector(c *Client) *Collector {
+// NewCollector wraps a Sophos Client. out is the sink that CollectAll writes
+// results into. Bootstrap is run as the first step of CollectAll.
+func NewCollector(c *Client, out *Output) *Collector {
 	return &Collector{
 		client: c,
+		out:    out,
 		log:    logging.For("sophos"),
 	}
 }
 
+// Name returns the short collector identifier used in logs.
+func (c *Collector) Name() string { return "sophos" }
+
 // CollectAll runs the pipeline:
 //
+//  0. bootstrap      — authenticate and discover the regional API host
 //  1. list_endpoints
 //  2. list_users         (best-effort — for owner email)
 //  3. list_alerts        (count per endpoint)
 //  4. list_detections    (30d; sets fetch_error on failure)
 //  5. list_policies      (build endpoint→[]policy_name map)
 //  6. map_endpoint with all enrichment attached
-func (c *Collector) CollectAll(ctx context.Context) ([]Endpoint, error) {
+func (c *Collector) CollectAll(ctx context.Context) error {
+	if err := c.client.Bootstrap(ctx); err != nil {
+		return err
+	}
+
 	start := time.Now()
 
 	c.log.Info("fetching endpoints")
 	rawEndpoints, err := c.client.ListEndpoints(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	c.log.Info("discovered endpoints", "count", len(rawEndpoints))
 
@@ -83,7 +103,9 @@ func (c *Collector) CollectAll(ctx context.Context) ([]Endpoint, error) {
 	c.log.Info("complete",
 		"endpoints", len(endpoints),
 		"elapsed", logging.Elapsed(start))
-	return endpoints, nil
+	c.out.Endpoints = endpoints
+	c.out.Queries = c.client.Queries()
+	return nil
 }
 
 func emailOrDash(s string) string {

@@ -1,0 +1,94 @@
+{
+  "_comment": "Captured shape of the JumpCloud AI & SaaS Management API used by the SaaS collector. 'applications' is the /applications list; the per-app maps are the detail, accounts, usage, license and contract responses keyed by app id; 'catalog' is the global catalog keyed by catalog_app_id. Synthetic data — no real credentials or org info.",
+
+  "applications": [
+    {
+      "id": "app-figma",
+      "catalog_app_id": "cat-figma",
+      "owner_user_id": "u1",
+      "status": "APPROVED",
+      "access_restriction": "NO_ACTION",
+      "discovered_at": "2026-04-01T09:00:00Z",
+      "discovery_source_types": ["JUMPCLOUD_SSO", "BROWSER_EXTENSION"]
+    },
+    {
+      "id": "app-github",
+      "catalog_app_id": "cat-github",
+      "owner_user_id": "u2",
+      "status": "UNAPPROVED",
+      "access_restriction": "WARNING",
+      "discovered_at": "2026-05-10T11:30:00Z",
+      "discovery_source_types": ["CONNECTOR"]
+    },
+    {
+      "id": "app-chatgpt",
+      "owner_user_id": "u3",
+      "status": "NEWLY_DISCOVERED",
+      "access_restriction": "BLOCK",
+      "discovered_at": "2026-06-05T08:15:00Z",
+      "discovery_source_types": ["BROWSER_EXTENSION"]
+    }
+  ],
+
+  "details": {
+    "app-figma": {
+      "name": "Figma",
+      "sso_apps": [
+        {"id": "sso-figma", "app_name": "figma", "display_label": "Figma SSO", "template_name": "figma", "status": "CONNECTED"}
+      ]
+    },
+    "app-github": {
+      "name": "GitHub",
+      "sso_apps": [
+        {"id": "sso-github", "app_name": "github", "display_label": "GitHub SSO", "template_name": "github", "status": "NOT_CONNECTED"}
+      ]
+    },
+    "app-chatgpt": {
+      "name": "ChatGPT"
+    }
+  },
+
+  "accounts": {
+    "app-figma": [
+      {"id": "acc-figma-1", "user_id": "u1", "email": "designer@example.com", "username": "designer"},
+      {"id": "acc-figma-2", "user_id": "u4", "email": "pm@example.com", "username": "pm"}
+    ],
+    "app-github": [
+      {"id": "acc-gh-1", "user_id": "u2", "email": "dev@example.com", "username": "dev"}
+    ],
+    "app-chatgpt": [
+      {"id": "acc-cgpt-1", "email": "curious@example.com", "username": "curious"}
+    ]
+  },
+
+  "usage": {
+    "app-figma": [
+      {"account_id": "acc-figma-1", "latest_used_at": "2026-06-14T16:00:00Z"},
+      {"account_id": "acc-figma-2", "latest_used_at": "2026-06-16T10:00:00Z"}
+    ],
+    "app-github": [
+      {"account_id": "acc-gh-1", "latest_used_at": "2026-06-12T09:00:00Z"}
+    ],
+    "app-chatgpt": [
+      {"account_id": "acc-cgpt-1", "latest_used_at": "2026-06-15T13:45:00Z"}
+    ]
+  },
+
+  "licenses": {
+    "app-figma": [
+      {"id": "lic-figma", "name": "Professional", "count": 10, "assigned": 7, "unassigned": 3, "cost_per_license": 144.0, "is_unlimited": false}
+    ],
+    "app-github": [
+      {"id": "lic-github", "name": "Enterprise", "count": 0, "assigned": 5, "unassigned": 0, "is_unlimited": true}
+    ]
+  },
+
+  "contracts": {
+    "app-figma": {"cost": 1440.0, "currency": "USD", "term": "YEARLY_TERM", "renewal_date": "2027-04-01", "notes": "annual design seats"}
+  },
+
+  "catalog": {
+    "cat-figma": {"id": "cat-figma", "name": "Figma", "description": "Collaborative design", "domains": ["figma.com"], "logo_url": "https://logo/figma.png"},
+    "cat-github": {"id": "cat-github", "name": "GitHub", "description": "Code hosting", "domains": ["github.com"], "logo_url": "https://logo/github.png"}
+  }
+}

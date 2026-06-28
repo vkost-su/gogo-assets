@@ -21,8 +21,10 @@ var ErrMissing = errors.New("missing required env var")
 // JumpCloud holds JumpCloud API credentials.
 // APIKey may be empty — the collector is then skipped.
 type JumpCloud struct {
-	APIKey string
-	OrgID  string // optional; required only for MSP / multi-tenant accounts
+	APIKey        string
+	OrgID         string  // optional; required only for MSP / multi-tenant accounts
+	SaaSUsageDays int     // trailing usage window for SaaS App Management (1..90)
+	MaxRPS        float64 // steady request-rate cap across all JC collectors (0 ⇒ client default)
 }
 
 // Sophos holds Sophos Central API credentials.
@@ -45,6 +47,7 @@ type Sheets struct {
 	SpreadsheetID     string
 	Worksheet         string // GWS tab name
 	JCWorksheet       string
+	SaaSWorksheet     string // JumpCloud SaaS App Management tab
 	SophosWorksheet   string
 	MergedWorksheet   string
 	FindingsWorksheet string // drift-engine findings tab
@@ -63,26 +66,39 @@ type Settings struct {
 	EnrichDelay      time.Duration
 	RecentlySeenDays int
 	LogLevel         string
+	PersistLocal     bool // write the local storage tiers; false ⇒ Sheets-only (ephemeral)
+}
+
+// LoadOptions controls which service-specific credentials are required. The
+// loader always parses every known setting so defaults stay consistent across
+// binaries; these flags only decide which missing credentials are fatal.
+type LoadOptions struct {
+	RequireGoogle    bool
+	RequireJumpCloud bool
+	RequireSophos    bool
 }
 
 // Load reads .env (if present) and the OS environment, then assembles Settings.
 // OS environment values override .env values.
 //
-// envPath defaults to ".env" in the current directory when empty.
+// When envPath is empty, Load looks for ./.env in the working directory, and if
+// that is absent falls back to the XDG config location
+// $XDG_CONFIG_HOME/gogo-assets/.env (default ~/.config/gogo-assets/.env) — see
+// defaultEnvPath.
 func Load(envPath string) (Settings, error) {
-	if envPath == "" {
-		envPath = ".env"
-	}
-	// godotenv.Read returns the file's variables WITHOUT exporting them to
-	// os.Environ, keeping the two sources independent.
-	fileVars, _ := godotenv.Read(envPath) // missing file → nil map, no error
+	return LoadWithOptions(envPath, LoadOptions{RequireGoogle: true})
+}
 
-	get := func(name string) string {
-		if v, ok := os.LookupEnv(name); ok && v != "" {
-			return v
-		}
-		return fileVars[name]
+// LoadWithOptions is the shared loader for both the full orchestrator and
+// standalone service binaries. Use Load for the normal inventory binary, which
+// requires Google Workspace; use this when a service binary should validate only
+// its own credentials while still sharing defaults, XDG .env discovery, local
+// storage settings, logging, and rate-limit parsing.
+func LoadWithOptions(envPath string, opts LoadOptions) (Settings, error) {
+	if envPath == "" {
+		envPath = defaultEnvPath()
 	}
+	get := EnvLookup(envPath)
 
 	required := func(name string) (string, error) {
 		v := get(name)
@@ -99,20 +115,6 @@ func Load(envPath string) (Settings, error) {
 		return fallback
 	}
 
-	saPath, err := required("GWS_SA_JSON_PATH")
-	if err != nil {
-		return Settings{}, err
-	}
-	saPath = expandUser(saPath)
-	if _, err := os.Stat(saPath); err != nil {
-		return Settings{}, fmt.Errorf("GWS_SA_JSON_PATH not accessible: %w", err)
-	}
-
-	adminEmail, err := required("GWS_ADMIN_EMAIL")
-	if err != nil {
-		return Settings{}, err
-	}
-
 	days, err := strconv.Atoi(optional("RECENTLY_SEEN_DAYS", "14"))
 	if err != nil {
 		return Settings{}, fmt.Errorf("RECENTLY_SEEN_DAYS not an int: %w", err)
@@ -127,27 +129,49 @@ func Load(envPath string) (Settings, error) {
 		return Settings{}, fmt.Errorf("ENRICH_DELAY_S not an int: %w", err)
 	}
 
+	saasDays, err := strconv.Atoi(optional("JC_SAAS_USAGE_DAYS", "30"))
+	if err != nil {
+		return Settings{}, fmt.Errorf("JC_SAAS_USAGE_DAYS not an int: %w", err)
+	}
+	if saasDays < 1 {
+		saasDays = 1
+	}
+	if saasDays > 90 {
+		saasDays = 90
+	}
+
+	// 0 means "use the client's built-in default"; the loader keeps it at 0 when
+	// JC_MAX_RPS is unset rather than baking the default in two places.
+	maxRPS, err := strconv.ParseFloat(optional("JC_MAX_RPS", "0"), 64)
+	if err != nil || maxRPS < 0 {
+		return Settings{}, fmt.Errorf("JC_MAX_RPS must be a non-negative number: %q", get("JC_MAX_RPS"))
+	}
+
 	localDir := expandUser(optional("LOCAL_DIR", "./local"))
 	baselineDir := expandUser(optional("BASELINE_DIR", filepath.Join(localDir, "baseline")))
 
+	google, err := loadGoogle(required, optional, opts.RequireGoogle)
+	if err != nil {
+		return Settings{}, err
+	}
+	jc, err := loadJumpCloud(optional, opts.RequireJumpCloud, saasDays, maxRPS)
+	if err != nil {
+		return Settings{}, err
+	}
+	sp, err := loadSophos(optional, opts.RequireSophos)
+	if err != nil {
+		return Settings{}, err
+	}
+
 	return Settings{
-		JumpCloud: JumpCloud{
-			APIKey: optional("JC_API_KEY", ""),
-			OrgID:  optional("JC_ORG_ID", ""),
-		},
-		Sophos: Sophos{
-			ClientID:     optional("SOPHOS_CLIENT_ID", ""),
-			ClientSecret: optional("SOPHOS_CLIENT_SECRET", ""),
-		},
-		Google: Google{
-			SAJSONPath: saPath,
-			AdminEmail: adminEmail,
-			CustomerID: optional("GWS_CUSTOMER_ID", "my_customer"),
-		},
+		JumpCloud: jc,
+		Sophos:    sp,
+		Google:    google,
 		Sheets: Sheets{
 			SpreadsheetID:     optional("SHEETS_SPREADSHEET_ID", ""),
 			Worksheet:         optional("SHEETS_GW_WORKSHEET", "GoogleWorkspace"),
 			JCWorksheet:       optional("SHEETS_JC_WORKSHEET", "JumpCloud"),
+			SaaSWorksheet:     optional("SHEETS_SAAS_WORKSHEET", "SaaS"),
 			SophosWorksheet:   optional("SHEETS_SP_WORKSHEET", "Sophos"),
 			MergedWorksheet:   optional("SHEETS_MERGED_WORKSHEET", "UsersAll"),
 			FindingsWorksheet: optional("SHEETS_FINDINGS_WORKSHEET", "Findings"),
@@ -158,7 +182,148 @@ func Load(envPath string) (Settings, error) {
 		EnrichDelay:      time.Duration(enrichSecs) * time.Second,
 		RecentlySeenDays: days,
 		LogLevel:         strings.ToUpper(optional("LOG_LEVEL", "INFO")),
+		PersistLocal:     persistLocal(get),
 	}, nil
+}
+
+func loadGoogle(
+	required func(string) (string, error),
+	optional func(string, string) string,
+	require bool,
+) (Google, error) {
+	saPath := optional("GWS_SA_JSON_PATH", "")
+	adminEmail := optional("GWS_ADMIN_EMAIL", "")
+	if require {
+		var err error
+		saPath, err = required("GWS_SA_JSON_PATH")
+		if err != nil {
+			return Google{}, err
+		}
+		adminEmail, err = required("GWS_ADMIN_EMAIL")
+		if err != nil {
+			return Google{}, err
+		}
+	}
+
+	if saPath != "" {
+		saPath = expandUser(saPath)
+		if require {
+			if _, err := os.Stat(saPath); err != nil {
+				return Google{}, fmt.Errorf("GWS_SA_JSON_PATH not accessible: %w", err)
+			}
+		}
+	}
+
+	return Google{
+		SAJSONPath: saPath,
+		AdminEmail: adminEmail,
+		CustomerID: optional("GWS_CUSTOMER_ID", "my_customer"),
+	}, nil
+}
+
+func loadJumpCloud(
+	optional func(string, string) string,
+	require bool,
+	saasDays int,
+	maxRPS float64,
+) (JumpCloud, error) {
+	apiKey := optional("JC_API_KEY", "")
+	if require && apiKey == "" {
+		return JumpCloud{}, fmt.Errorf("%w: JC_API_KEY", ErrMissing)
+	}
+	return JumpCloud{
+		APIKey:        apiKey,
+		OrgID:         optional("JC_ORG_ID", ""),
+		SaaSUsageDays: saasDays,
+		MaxRPS:        maxRPS,
+	}, nil
+}
+
+func loadSophos(
+	optional func(string, string) string,
+	require bool,
+) (Sophos, error) {
+	clientID := optional("SOPHOS_CLIENT_ID", "")
+	clientSecret := optional("SOPHOS_CLIENT_SECRET", "")
+	if require {
+		if clientID == "" {
+			return Sophos{}, fmt.Errorf("%w: SOPHOS_CLIENT_ID", ErrMissing)
+		}
+		if clientSecret == "" {
+			return Sophos{}, fmt.Errorf("%w: SOPHOS_CLIENT_SECRET", ErrMissing)
+		}
+	}
+	return Sophos{ClientID: clientID, ClientSecret: clientSecret}, nil
+}
+
+// EnvLookup performs the same .env discovery as Load — ./.env in the working
+// directory, else $XDG_CONFIG_HOME/gogo-assets/.env — and returns a lookup that
+// resolves a name from the OS environment first, then the file. An empty
+// envPath triggers the default discovery.
+//
+// It requires no variables, so standalone collector binaries (cmd/jc, cmd/sophos)
+// can honour the same credential file as the orchestrator while validating only
+// the variables they actually need.
+func EnvLookup(envPath string) func(name string) string {
+	if envPath == "" {
+		envPath = defaultEnvPath()
+	}
+	// godotenv.Read returns the file's variables WITHOUT exporting them to
+	// os.Environ, keeping the two sources independent.
+	fileVars, _ := godotenv.Read(envPath) // missing file → nil map, no error
+	return func(name string) string {
+		if v, ok := os.LookupEnv(name); ok && v != "" {
+			return v
+		}
+		return fileVars[name]
+	}
+}
+
+// ExpandUser replaces a leading "~/" (or a bare "~") with $HOME. Exposed so
+// standalone binaries expand path-valued env vars (LOCAL_DIR, key paths) the
+// same way Load does.
+func ExpandUser(p string) string { return expandUser(p) }
+
+// persistLocal decides whether the run writes the local storage tiers (history +
+// the source of truth the `sheets` command republishes from) or runs ephemerally
+// and publishes to Google Sheets only.
+//
+// An explicit LOCAL_PERSIST (true/false) overrides everything. Otherwise the run
+// is ephemeral only on a GitHub-hosted runner — RUNNER_ENVIRONMENT=github-hosted,
+// whose filesystem is discarded when the job ends, so only Sheets survives. A
+// self-hosted runner or a local machine persists.
+func persistLocal(get func(string) string) bool {
+	if v := get("LOCAL_PERSIST"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
+		}
+	}
+	return !strings.EqualFold(get("RUNNER_ENVIRONMENT"), "github-hosted")
+}
+
+// defaultEnvPath picks the .env file Load reads when no explicit path is given:
+// ./.env in the working directory when it exists, otherwise the XDG config
+// location $XDG_CONFIG_HOME/gogo-assets/.env (falling back to
+// ~/.config/gogo-assets/.env). This lets credentials live outside the repo
+// tree. OS environment variables still override whatever the file provides, so
+// this only controls where file-level defaults are read from.
+//
+// Note: this deliberately uses the XDG ~/.config convention rather than
+// os.UserConfigDir(), which on macOS resolves to ~/Library/Application Support.
+func defaultEnvPath() string {
+	const local = ".env"
+	if _, err := os.Stat(local); err == nil {
+		return local
+	}
+	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return local
+		}
+		base = filepath.Join(home, ".config")
+	}
+	return filepath.Join(base, "gogo-assets", ".env")
 }
 
 // expandUser mirrors Python's Path.expanduser — replaces a leading "~/" with $HOME.

@@ -10,8 +10,12 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"time"
+
+	"golang.org/x/time/rate"
+
+	"gogo-assets/internal/apiquery"
+	"gogo-assets/internal/httpstat"
 )
 
 // ErrNotLicensed wraps 403/404 responses from optional surfaces such as
@@ -26,6 +30,12 @@ const (
 	_maxRetries     = 5
 	_backoffBase    = 2 * time.Second
 	_pageLimit      = 100
+
+	// _defaultMaxRPS is the steady request rate the client holds itself to when
+	// the caller passes nothing. JumpCloud throttles bursts with 429s, so a
+	// smooth rate is far faster end-to-end than firing concurrently and eating
+	// exponential backoff. Tunable via JC_MAX_RPS.
+	_defaultMaxRPS = 8.0
 )
 
 // Client talks to all three JumpCloud API surfaces (v1, v2, System Insights).
@@ -33,34 +43,64 @@ const (
 //
 // Pass orgID only for MSP / multi-tenant accounts.
 type Client struct {
-	apiKey string
-	orgID  string
-	http   *http.Client
+	apiKey  string
+	orgID   string
+	http    *http.Client
+	limiter *rate.Limiter     // shared across all goroutines; smooths the request rate
+	queries *apiquery.Recorder // records the concrete endpoint templates issued
 }
 
-// New builds an authenticated client. orgID may be empty for single-tenant accounts.
-func New(apiKey, orgID string) *Client {
+// New builds an authenticated client. orgID may be empty for single-tenant
+// accounts. maxRPS caps the steady request rate the client holds itself to
+// across all concurrent callers (≤0 ⇒ _defaultMaxRPS); a single shared token
+// bucket keeps every collector under JumpCloud's limit so 429-driven backoff is
+// the rare exception, not the norm. counter, when non-nil, tallies every HTTP
+// response for the end-of-run report.
+func New(apiKey, orgID string, maxRPS float64, counter *httpstat.Counter) *Client {
+	if maxRPS <= 0 {
+		maxRPS = _defaultMaxRPS
+	}
+	// Burst = one second's worth of tokens, so a short flurry is allowed but the
+	// sustained rate stays at maxRPS.
+	burst := int(maxRPS)
+	if burst < 1 {
+		burst = 1
+	}
+	var transport http.RoundTripper = http.DefaultTransport
+	if counter != nil {
+		transport = counter.Wrap(transport)
+	}
 	return &Client{
-		apiKey: apiKey,
-		orgID:  orgID,
-		http:   &http.Client{Timeout: _defaultTimeout},
+		apiKey:  apiKey,
+		orgID:   orgID,
+		http:    &http.Client{Timeout: _defaultTimeout, Transport: transport},
+		limiter: rate.NewLimiter(rate.Limit(maxRPS), burst),
+		queries: apiquery.New(),
 	}
 }
+
+// Queries returns the concrete API query templates this client issued, sorted.
+// It is the JumpCloud half of the run's per-service provenance manifest (system,
+// directory, and SaaS endpoints share one client, hence one manifest).
+func (c *Client) Queries() []string { return c.queries.Queries() }
 
 // ── v1 ───────────────────────────────────────────────────────────────────────
 
 // ListSystems returns all enrolled systems (v1, paginated).
 func (c *Client) ListSystems(ctx context.Context) ([]map[string]any, error) {
+	c.queries.Record("GET /api/systems")
 	return c.paginateV1(ctx, "/api/systems")
 }
 
 // ListUsers returns all system users including ssh_keys (v1, paginated).
 func (c *Client) ListUsers(ctx context.Context) ([]map[string]any, error) {
+	c.queries.Record("GET /api/systemusers")
 	return c.paginateV1(ctx, "/api/systemusers")
 }
 
 // GetSystem returns the full detail for one system (MDM, FDE, policyStats, …).
 func (c *Client) GetSystem(ctx context.Context, systemID string) (map[string]any, error) {
+	c.queries.Record("GET /api/systems/{id}")
 	return c.getJSON(ctx, _baseV1+"/api/systems/"+systemID)
 }
 
@@ -68,17 +108,20 @@ func (c *Client) GetSystem(ctx context.Context, systemID string) (map[string]any
 
 // GetSystemUsers returns user bindings for one system (v2, paginated).
 func (c *Client) GetSystemUsers(ctx context.Context, systemID string) ([]map[string]any, error) {
+	c.queries.Record("GET /api/v2/systems/{id}/users")
 	return c.paginateV2(ctx, _baseV2+"/systems/"+systemID+"/users", false)
 }
 
 // GetPolicyStatuses returns last-reported policy result per policy for one system.
 func (c *Client) GetPolicyStatuses(ctx context.Context, systemID string) ([]map[string]any, error) {
+	c.queries.Record("GET /api/v2/systems/{id}/policystatuses")
 	return c.paginateV2(ctx, _baseV2+"/systems/"+systemID+"/policystatuses", false)
 }
 
 // GetAggregatedPolicyStats returns aggregated policy stats (failedPolicies,
 // pendingPolicies, policyCountData).
 func (c *Client) GetAggregatedPolicyStats(ctx context.Context, systemID string) (map[string]any, error) {
+	c.queries.Record("GET /api/v2/systems/{id}/aggregated-policy-stats")
 	return c.getJSON(ctx, _baseV2+"/systems/"+systemID+"/aggregated-policy-stats")
 }
 
@@ -87,6 +130,7 @@ func (c *Client) GetAggregatedPolicyStats(ctx context.Context, systemID string) 
 // SIPerSystem fetches a per-system System Insights table at
 // /systeminsights/{system_id}/{table}. Returns nil on 403/404.
 func (c *Client) SIPerSystem(ctx context.Context, systemID, table string) ([]map[string]any, error) {
+	c.queries.Record("GET /api/v2/systeminsights/{id}/{table}")
 	return c.paginateV2(ctx, _baseV2+"/systeminsights/"+systemID+"/"+table, true)
 }
 
@@ -94,6 +138,7 @@ func (c *Client) SIPerSystem(ctx context.Context, systemID, table string) ([]map
 // (deb_packages, rpm_packages, block_devices, usb_devices), filtered by system_id.
 // Returns nil on 403/404.
 func (c *Client) SIOrgWide(ctx context.Context, systemID, table string) ([]map[string]any, error) {
+	c.queries.Record("GET /api/v2/systeminsights/{table}?filter=system_id")
 	u := _baseV2 + "/systeminsights/" + table
 	return c.paginateV2WithExtra(ctx, u,
 		url.Values{"filter": []string{"system_id:eq:" + systemID}},
@@ -115,11 +160,22 @@ func (c *Client) setHeaders(req *http.Request) {
 // as ErrNotLicensed and any other non-2xx as a generic error.
 func (c *Client) do(ctx context.Context, req *http.Request) (*http.Response, error) {
 	var lastErr error
+	var retryAfter time.Duration // set from a Retry-After header; overrides backoff
 	for attempt := 0; attempt < _maxRetries; attempt++ {
 		if attempt > 0 {
-			if err := sleep(ctx, backoff(attempt)); err != nil {
+			wait := backoff(attempt)
+			if retryAfter > 0 {
+				wait, retryAfter = retryAfter, 0
+			}
+			if err := sleep(ctx, wait); err != nil {
 				return nil, err
 			}
+		}
+
+		// Hold to the steady rate before every attempt (including retries) so the
+		// whole fleet of collectors shares one budget and rarely trips 429.
+		if err := c.limiter.Wait(ctx); err != nil {
+			return nil, err
 		}
 
 		// http.Request body needs re-cloning for retries; we only retry GETs (no body) here.
@@ -133,10 +189,11 @@ func (c *Client) do(ctx context.Context, req *http.Request) (*http.Response, err
 
 		switch {
 		case resp.StatusCode == 429 || resp.StatusCode/100 == 5:
-			// Honour Retry-After if present.
+			// Honour Retry-After if present — it replaces the next backoff rather
+			// than stacking on top of it.
 			if ra := resp.Header.Get("Retry-After"); ra != "" {
 				if secs, err := strconv.Atoi(ra); err == nil {
-					_ = sleep(ctx, time.Duration(secs)*time.Second)
+					retryAfter = time.Duration(secs) * time.Second
 				}
 			}
 			lastErr = fmt.Errorf("%s %s returned %d", req.Method, req.URL.Path, resp.StatusCode)
@@ -291,6 +348,3 @@ func sleep(ctx context.Context, d time.Duration) error {
 		return nil
 	}
 }
-
-// Used so unimported strings stays referenced if we trim helpers.
-var _ = strings.ToLower

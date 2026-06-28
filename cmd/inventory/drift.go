@@ -34,7 +34,11 @@ import (
 // without a baseline is still a valid, useful run. Drift is only meaningful on
 // a full snapshot, so the caller gates this on target == "all" — a partial
 // target would make the census diff flag every uncollected entity as gone.
-func runDrift(log *slog.Logger, store *snapshot.Store, snap model.Snapshot, now time.Time, maxBytes int) ([]model.Finding, error) {
+// persist=false (an ephemeral, Sheets-only run) skips every disk write: the
+// findings are still computed and returned for the Findings tab, but
+// classification.json and digest.json are not written. The previous digest is
+// then absent, so first_seen resets — acceptable when nothing is retained.
+func runDrift(log *slog.Logger, store *snapshot.Store, snap model.Snapshot, now time.Time, maxBytes int, persist bool) ([]model.Finding, error) {
 	b, err := baseline.Load(store.BaselineDir())
 	if errors.Is(err, baseline.ErrNoBaseline) {
 		log.Info("no baseline (classes.json absent) — skipping drift", "baseline_dir", store.BaselineDir())
@@ -66,8 +70,10 @@ func runDrift(log *slog.Logger, store *snapshot.Store, snap model.Snapshot, now 
 		"unclassified", unclassified,
 		"coverage_findings", len(coverage))
 
-	if _, err := store.WriteCurrentJSON("classification.json", results); err != nil {
-		log.Error("classification write failed", "err", err)
+	if persist {
+		if _, err := store.WriteCurrentJSON("classification.json", results); err != nil {
+			log.Error("classification write failed", "err", err)
+		}
 	}
 
 	// ── Phase 2: compare ───────────────────────────────────────────────────
@@ -84,9 +90,11 @@ func runDrift(log *slog.Logger, store *snapshot.Store, snap model.Snapshot, now 
 	if err != nil {
 		return findings, fmt.Errorf("build digest: %w", err)
 	}
-	res, err := store.WriteDigest(snap.RunDate, buf)
-	if err != nil {
-		return findings, fmt.Errorf("write digest: %w", err)
+	var res snapshot.Result
+	if persist {
+		if res, err = store.WriteDigest(snap.RunDate, buf); err != nil {
+			return findings, fmt.Errorf("write digest: %w", err)
+		}
 	}
 	doneDigest(
 		"findings", len(d.Findings),

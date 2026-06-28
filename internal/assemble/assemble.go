@@ -31,7 +31,36 @@ type Sources struct {
 	GWS       map[string]*gworkspace.UserRecord // keyed by primary email
 	JCSystems []jumpcloud.System
 	JCUsers   map[string]jumpcloud.User // keyed by email
+	JCSaaS    []jumpcloud.SaaSApp       // JumpCloud SaaS App Management
 	Endpoints []sophos.Endpoint
+
+	// Concrete API query templates each collector issued this run, carried into
+	// the snapshot's provenance block. Empty when a collector was skipped.
+	GWSQueries []string
+	JCQueries  []string
+	SophosQueries []string
+}
+
+// SourcesFrom builds a Sources from the typed outputs of the three collectors.
+// Nil outputs (skipped collectors) produce empty/nil fields, which Build
+// handles gracefully by producing empty shards.
+func SourcesFrom(gws *gworkspace.Output, jc *jumpcloud.Output, sp *sophos.Output) Sources {
+	var src Sources
+	if gws != nil {
+		src.GWS = gws.Records
+		src.GWSQueries = gws.Queries
+	}
+	if jc != nil {
+		src.JCSystems = jc.Systems
+		src.JCUsers = jc.Users
+		src.JCSaaS = jc.SaaSApps
+		src.JCQueries = jc.Queries
+	}
+	if sp != nil {
+		src.Endpoints = sp.Endpoints
+		src.SophosQueries = sp.Queries
+	}
+	return src
 }
 
 // Build assembles a canonical Snapshot stamped with runTimestamp (the exact UTC
@@ -49,6 +78,11 @@ func Build(src Sources, runTimestamp time.Time, runDate string) model.Snapshot {
 		JumpCloud:       buildJumpCloud(src, meta),
 		Sophos:          buildSophos(src, meta),
 		GoogleWorkspace: buildGWS(src, meta),
+		Provenance: model.Provenance{
+			JumpCloud:       src.JCQueries,
+			Sophos:          src.SophosQueries,
+			GoogleWorkspace: src.GWSQueries,
+		},
 	}
 }
 
@@ -69,10 +103,25 @@ func buildJumpCloud(src Sources, meta model.Meta) model.JumpCloudShard {
 	}
 	sort.Slice(identity, func(i, j int) bool { return identity[i].Email < identity[j].Email })
 
+	saas := make([]model.SaaSApp, 0, len(src.JCSaaS))
+	for _, a := range src.JCSaaS {
+		saas = append(saas, jumpcloud.ToSaaSApp(a, meta))
+	}
+	sort.Slice(saas, func(i, j int) bool {
+		if saas[i].Category != saas[j].Category {
+			return saas[i].Category < saas[j].Category
+		}
+		if saas[i].Name != saas[j].Name {
+			return saas[i].Name < saas[j].Name
+		}
+		return saas[i].AppID < saas[j].AppID
+	})
+
 	return model.JumpCloudShard{
 		Devices:           devices,
 		Identity:          identity,
 		PolicyEnforcement: jumpcloud.ToPolicyEnforcement(src.JCSystems, meta),
+		SaaS:              saas,
 	}
 }
 

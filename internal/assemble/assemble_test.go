@@ -171,3 +171,93 @@ func TestBuild_EmptySourcesProducesEmptyShards(t *testing.T) {
 		t.Error("no endpoints → account health should be nil")
 	}
 }
+
+// saasSources builds a JCSaaS slice deliberately out of canonical order, with
+// every tiebreak the sort must resolve (Category → Name → AppID) and a rich app
+// to exercise the rollups.
+func saasSources() Sources {
+	usedEarly := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+	usedLate := time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)
+	return Sources{
+		JCSaaS: []jumpcloud.SaaSApp{
+			// Communication / Zoom — last after sorting.
+			{AppID: "app-zoom", Name: "Zoom", Category: "Communication"},
+			// AI / Claude / app-claude-b — AppID tiebreak vs app-claude-a.
+			{AppID: "app-claude-b", Name: "Claude", Category: "AI",
+				Licenses: []jumpcloud.SaaSLicense{{Count: 0, Assigned: 5, IsUnlimited: true}}},
+			// AI / ChatGPT — rich app: connected SSO, finite licenses, two
+			// accounts (latest usage wins), and a contract.
+			{AppID: "app-chatgpt", Name: "ChatGPT", Category: "AI",
+				SSOApps:  []jumpcloud.SaaSSSOApp{{ID: "s1", Status: "CONNECTED"}},
+				Licenses: []jumpcloud.SaaSLicense{{Count: 10, Assigned: 7, Unassigned: 3}},
+				Accounts: []jumpcloud.SaaSAccount{
+					{AccountID: "a1", LatestUsedAt: usedEarly},
+					{AccountID: "a2", LatestUsedAt: usedLate},
+				},
+				Contract: &jumpcloud.SaaSContract{Cost: 1440, Currency: "USD"}},
+			// Communication / Slack — name tiebreak vs Zoom within Communication.
+			{AppID: "app-slack", Name: "Slack", Category: "Communication"},
+			// AI / Claude / app-claude-a — sorts before app-claude-b.
+			{AppID: "app-claude-a", Name: "Claude", Category: "AI",
+				SSOApps: []jumpcloud.SaaSSSOApp{{ID: "s2", Status: "NOT_CONNECTED"}}},
+		},
+	}
+}
+
+// TestBuild_SaaSSortAndRollups is the assemble leg of the SaaS pipeline: raw
+// collector SaaSApps → canonical model.SaaSApp slice, sorted deterministically
+// (Category → Name → AppID) with the rollups flattened.
+func TestBuild_SaaSSortAndRollups(t *testing.T) {
+	snap := Build(saasSources(), time.Unix(0, 0).UTC(), "2026-06-12")
+	saas := snap.JumpCloud.SaaS
+
+	wantOrder := []string{"app-chatgpt", "app-claude-a", "app-claude-b", "app-slack", "app-zoom"}
+	if len(saas) != len(wantOrder) {
+		t.Fatalf("saas count = %d, want %d", len(saas), len(wantOrder))
+	}
+	for i, want := range wantOrder {
+		if saas[i].AppID != want {
+			t.Errorf("saas[%d] = %q, want %q (sort Category→Name→AppID)", i, saas[i].AppID, want)
+		}
+	}
+
+	byID := make(map[string]model.SaaSApp, len(saas))
+	for _, a := range saas {
+		byID[a.AppID] = a
+	}
+
+	// ChatGPT: finite license rollup, connected SSO, latest usage = the later
+	// of two accounts, and the contract carried through.
+	cgpt := byID["app-chatgpt"]
+	if cgpt.LicenseTotal != 10 || cgpt.LicenseAssigned != 7 || cgpt.LicenseUnassigned != 3 {
+		t.Errorf("chatgpt license rollup = %d/%d/%d, want 10/7/3", cgpt.LicenseTotal, cgpt.LicenseAssigned, cgpt.LicenseUnassigned)
+	}
+	if !cgpt.SSOConnected {
+		t.Error("chatgpt SSOConnected = false, want true")
+	}
+	if cgpt.AccountCount != 2 {
+		t.Errorf("chatgpt account count = %d, want 2", cgpt.AccountCount)
+	}
+	if cgpt.LatestUsedAt == nil || cgpt.LatestUsedAt.UTC().Format("2006-01-02") != "2026-06-15" {
+		t.Errorf("chatgpt latest used = %v, want 2026-06-15", cgpt.LatestUsedAt)
+	}
+	if cgpt.Contract == nil || cgpt.Contract.Cost != 1440 {
+		t.Errorf("chatgpt contract = %+v", cgpt.Contract)
+	}
+
+	// Claude-b: unlimited license tier folds its assigned count into the total.
+	cb := byID["app-claude-b"]
+	if cb.LicenseTotal != 5 || cb.LicenseAssigned != 5 {
+		t.Errorf("claude-b unlimited rollup = %d/%d, want 5/5", cb.LicenseTotal, cb.LicenseAssigned)
+	}
+
+	// Claude-a: SSO present but not connected.
+	if ca := byID["app-claude-a"]; ca.SSOConnected {
+		t.Error("claude-a SSOConnected = true, want false")
+	}
+
+	// Provenance flows from assemble into every SaaS entity.
+	if cgpt.Meta.SourceAPI != "jumpcloud.saas" {
+		t.Errorf("saas SourceAPI = %q, want jumpcloud.saas", cgpt.Meta.SourceAPI)
+	}
+}

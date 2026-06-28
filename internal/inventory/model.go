@@ -52,6 +52,7 @@ type AssetInventory struct {
 	Users           map[string]*UnifiedUserRecord `json:"users"`
 	JCSystems       []jumpcloud.System            `json:"jc_systems,omitempty"`
 	JCUsers         map[string]jumpcloud.User     `json:"jc_users,omitempty"`
+	SaaSApps        []jumpcloud.SaaSApp           `json:"saas_apps,omitempty"`
 	SophosEndpoints []sophos.Endpoint             `json:"sophos_endpoints,omitempty"`
 	UnownedDevices  []DevicePair                  `json:"unowned_devices,omitempty"`
 	MatchStats      map[string]int                `json:"match_stats,omitempty"`

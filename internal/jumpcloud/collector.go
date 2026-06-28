@@ -10,12 +10,25 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"gogo-assets/internal/collector"
 	"gogo-assets/internal/logging"
 )
 
+// Compile-time check that Collector satisfies the collector.Collector interface.
+var _ collector.Collector = (*Collector)(nil)
+
+// Output holds the results of a completed JumpCloud collection.
+type Output struct {
+	Systems  []System        `json:"systems"`
+	Users    map[string]User `json:"users"`
+	SaaSApps []SaaSApp       `json:"saas_apps"`
+	Queries  []string        `json:"queries"` // concrete API query templates issued this run
+}
+
 // CollectorOpts tunes the per-system fan-out. Zero values fall back to defaults.
 type CollectorOpts struct {
-	MaxWorkers int // default: 8
+	MaxWorkers    int // default: 8
+	SaaSUsageDays int // trailing usage window for SaaS App Management, 1..90; default 30
 }
 
 // Collector runs the JumpCloud 2-stage pipeline.
@@ -24,30 +37,45 @@ type CollectorOpts struct {
 //
 // Stage 2: per system, enrich with v1 detail, v2 user bindings, policy
 // statuses, and System Insights tables (parallel fan-out, up to MaxWorkers).
+//
+// After the system/user pipeline, the SaaS App Management surface is collected
+// with a best-effort pass (unlicensed or failed → empty, never fatal).
 type Collector struct {
-	client     *Client
-	maxWorkers int
-	log        *slog.Logger
+	client        *Client
+	out           *Output
+	maxWorkers    int
+	saasUsageDays int
+	log           *slog.Logger
 }
 
-// NewCollector wraps an authenticated client.
-func NewCollector(c *Client, opts CollectorOpts) *Collector {
+// NewCollector wraps an authenticated client. out is the sink that CollectAll
+// writes results into; the caller retains a typed reference for downstream use.
+func NewCollector(c *Client, out *Output, opts CollectorOpts) *Collector {
 	if opts.MaxWorkers <= 0 {
 		opts.MaxWorkers = 8
 	}
+	if opts.SaaSUsageDays <= 0 {
+		opts.SaaSUsageDays = 30
+	}
 	return &Collector{
-		client:     c,
-		maxWorkers: opts.MaxWorkers,
-		log:        logging.For("jc"),
+		client:        c,
+		out:           out,
+		maxWorkers:    opts.MaxWorkers,
+		saasUsageDays: opts.SaaSUsageDays,
+		log:           logging.For("jc"),
 	}
 }
 
-// CollectAll returns (systems, usersByEmail).
-func (c *Collector) CollectAll(ctx context.Context) ([]System, map[string]User, error) {
+// Name returns the short collector identifier used in logs.
+func (c *Collector) Name() string { return "jc" }
+
+// CollectAll runs the systems+users pipeline followed by a best-effort SaaS
+// collection, writing all results into c.out.
+func (c *Collector) CollectAll(ctx context.Context) error {
 	start := time.Now()
 	systemsRaw, usersRaw, err := c.stage1Bulk(ctx)
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 
 	usersByID := make(map[string]User, len(usersRaw))
@@ -61,7 +89,7 @@ func (c *Collector) CollectAll(ctx context.Context) ([]System, map[string]User, 
 
 	systems, err := c.stage2Enrich(ctx, systemsRaw, usersByID)
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
 
 	usersByEmail := make(map[string]User, len(usersByID))
@@ -74,7 +102,23 @@ func (c *Collector) CollectAll(ctx context.Context) ([]System, map[string]User, 
 		"systems", len(systems),
 		"users", len(usersByEmail),
 		"elapsed", logging.Elapsed(start))
-	return systems, usersByEmail, nil
+
+	c.out.Systems = systems
+	c.out.Users = usersByEmail
+
+	// SaaS App Management is an optional surface: unlicensed or failed folds to
+	// empty and never aborts the run.
+	saasApps, err := NewSaaSCollector(c.client, SaaSCollectorOpts{UsageDays: c.saasUsageDays}).CollectAll(ctx, usersByEmail)
+	if err != nil {
+		c.log.Warn("saas collect failed — continuing without SaaS", "err", err)
+	} else {
+		c.out.SaaSApps = saasApps
+	}
+
+	// Recorded last so the manifest covers the system, directory, and SaaS
+	// endpoints that share this one client.
+	c.out.Queries = c.client.Queries()
+	return nil
 }
 
 // ── Stage 1 ──────────────────────────────────────────────────────────────────

@@ -58,6 +58,28 @@ func TestWriteSnapshotIdempotent(t *testing.T) {
 	}
 }
 
+func TestWriteSaaSWritesCurrentAndDaily(t *testing.T) {
+	store := NewStore(t.TempDir())
+	export := map[string]any{"schema_version": "1.0", "count": 1}
+
+	res, err := store.WriteSaaS(export, "2026-06-11")
+	if err != nil {
+		t.Fatalf("write saas: %v", err)
+	}
+	if filepath.Base(res.Path) != "saas.json" {
+		t.Errorf("current path = %q, want .../saas.json", res.Path)
+	}
+
+	// Both the live copy and the dated daily mirror must exist.
+	current := filepath.Join(store.root, tierCurrent, "saas.json")
+	daily := filepath.Join(store.root, tierDaily, "2026-06-11", "saas.json")
+	for _, p := range []string{current, daily} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("expected %s: %v", p, err)
+		}
+	}
+}
+
 func TestWriteLeavesNoTempFiles(t *testing.T) {
 	store := NewStore(t.TempDir())
 	if _, err := store.WriteSnapshot(sampleSnapshot()); err != nil {

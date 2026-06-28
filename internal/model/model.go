@@ -88,17 +88,29 @@ type Snapshot struct {
 	JumpCloud       JumpCloudShard `json:"jumpcloud"`
 	Sophos          SophosShard    `json:"sophos"`
 	GoogleWorkspace GWSShard       `json:"google_workspace"`
+	Provenance      Provenance     `json:"provenance"`
+}
+
+// Provenance records the concrete API query templates each service collector
+// issued for this run — the endpoint shapes (method + path, dynamic segments as
+// {placeholders}) actually exercised. Each list is deduplicated and sorted, so
+// identical collector behaviour yields a byte-identical block.
+type Provenance struct {
+	JumpCloud       []string `json:"jumpcloud,omitempty"`
+	Sophos          []string `json:"sophos,omitempty"`
+	GoogleWorkspace []string `json:"google_workspace,omitempty"`
 }
 
 // JumpCloudShard groups the JumpCloud canonical records.
 //
 // Devices and Identity are classified entities (run through the drift engine).
-// PolicyEnforcement is a per-policy rollup kept for dashboard/drill-down; it is
-// not classified in this version.
+// PolicyEnforcement and SaaS are kept for dashboard/drill-down; they are not
+// classified in this version.
 type JumpCloudShard struct {
 	Devices           []JCDevice            `json:"devices"`
 	Identity          []JCUser              `json:"identity"`
 	PolicyEnforcement []JCPolicyEnforcement `json:"policy_enforcement"`
+	SaaS              []SaaSApp             `json:"saas,omitempty"`
 }
 
 // SophosShard groups the Sophos canonical records.
@@ -194,6 +206,94 @@ type JCPolicyEnforcement struct {
 	AppliedCount *int `json:"applied_count" drift:"monitored,sev=high"`
 	FailedCount  int  `json:"failed_count"  drift:"volatile"`
 	PendingCount int  `json:"pending_count" drift:"volatile"`
+}
+
+// SaaSApp is one application discovered by JumpCloud AI & SaaS Management, with
+// its owner accounts, license/contract economics, SSO connections, and usage
+// rolled into a single record.
+//
+// This entity is stored for the SaaS dashboard tab and drill-down only; it is
+// not classified in this version (like JCPolicyEnforcement). Status
+// (NEWLY_DISCOVERED / UNAPPROVED / …) is a strong shadow-IT signal left for a
+// future drift wiring.
+//
+// Category is a derived heuristic (the public API exposes no category taxonomy).
+type SaaSApp struct {
+	Meta Meta `json:"meta"`
+
+	AppID string `json:"app_id" drift:"identity"`
+	Name  string `json:"name"   drift:"identity"`
+
+	CatalogAppID string   `json:"catalog_app_id,omitempty"`
+	Category     string   `json:"category,omitempty"` // derived, not from the API
+	Description  string   `json:"description,omitempty"`
+	Domains      []string `json:"domains,omitempty"`
+	LogoURL      string   `json:"logo_url,omitempty"`
+
+	Status            string `json:"status,omitempty"`             // NEWLY_DISCOVERED|APPROVED|UNAPPROVED|IGNORED
+	AccessRestriction string `json:"access_restriction,omitempty"` // NO_ACTION|WARNING|BLOCK|…
+
+	OwnerUserID  string     `json:"owner_user_id,omitempty"`
+	OwnerEmail   string     `json:"owner_email,omitempty"`
+	DiscoveredAt *time.Time `json:"discovered_at,omitempty" drift:"volatile"`
+
+	DiscoverySources []string     `json:"discovery_sources,omitempty"` // BROWSER_EXTENSION|JUMPCLOUD_SSO|CONNECTOR|…
+	SSOConnected     bool         `json:"sso_connected"`
+	SSOApps          []SaaSSSOApp `json:"sso_apps,omitempty"`
+
+	Accounts []SaaSAccount `json:"accounts,omitempty"`
+	Licenses []SaaSLicense `json:"licenses,omitempty"`
+	Contract *SaaSContract `json:"contract,omitempty"`
+
+	// Rollups derived from the nested data.
+	AccountCount      int        `json:"account_count"`
+	LicenseTotal      int        `json:"license_total"`
+	LicenseAssigned   int        `json:"license_assigned"`
+	LicenseUnassigned int        `json:"license_unassigned"`
+	LatestUsedAt      *time.Time `json:"latest_used_at,omitempty" drift:"volatile"`
+}
+
+// SaaSAccount is one user account found inside a SaaS application — the
+// license-owner identity. UserID links to a JumpCloud directory user when the
+// account was matched; Email/Username are the account's own credentials.
+// DeviceOwner is the fallback attribution (the owner of the device on which a
+// device-agent account with no own identity was discovered).
+type SaaSAccount struct {
+	AccountID    string     `json:"account_id"`
+	UserID       string     `json:"user_id,omitempty"`
+	Email        string     `json:"email,omitempty"`
+	Username     string     `json:"username,omitempty"`
+	DeviceOwner  string     `json:"device_owner,omitempty"`
+	LatestUsedAt *time.Time `json:"latest_used_at,omitempty"`
+}
+
+// SaaSLicense is one license tier within an application's contract.
+type SaaSLicense struct {
+	LicenseID      string  `json:"license_id"`
+	Name           string  `json:"name,omitempty"`
+	Count          int     `json:"count"`
+	Assigned       int     `json:"assigned"`
+	Unassigned     int     `json:"unassigned"`
+	CostPerLicense float64 `json:"cost_per_license,omitempty"`
+	IsUnlimited    bool    `json:"is_unlimited"`
+}
+
+// SaaSContract is the contract/cost summary for a SaaS application.
+type SaaSContract struct {
+	Cost        float64 `json:"cost,omitempty"` // total yearly contract cost
+	Currency    string  `json:"currency,omitempty"`
+	Term        string  `json:"term,omitempty"` // MONTHLY_TERM|YEARLY_TERM|FREE_TERM
+	RenewalDate string  `json:"renewal_date,omitempty"`
+	Notes       string  `json:"notes,omitempty"`
+}
+
+// SaaSSSOApp is an SSO connection associated with a SaaS application.
+type SaaSSSOApp struct {
+	ID           string `json:"id"`
+	AppName      string `json:"app_name,omitempty"`
+	DisplayLabel string `json:"display_label,omitempty"`
+	TemplateName string `json:"template_name,omitempty"`
+	Status       string `json:"status,omitempty"` // CONNECTED|NOT_CONNECTED
 }
 
 // ── Sophos ───────────────────────────────────────────────────────────────────

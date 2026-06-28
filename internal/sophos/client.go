@@ -12,6 +12,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gogo-assets/internal/apiquery"
+	"gogo-assets/internal/httpstat"
 )
 
 // ErrNotLicensed is returned when an optional API surface (detections, user
@@ -36,6 +39,7 @@ type Client struct {
 	clientID     string
 	clientSecret string
 	http         *http.Client
+	queries      *apiquery.Recorder // records the concrete endpoint templates issued
 
 	mu          sync.Mutex
 	accessToken string
@@ -44,14 +48,24 @@ type Client struct {
 	baseURL     string
 }
 
-// New builds a Sophos client. It performs no I/O.
-func New(clientID, clientSecret string) *Client {
+// New builds a Sophos client. It performs no I/O. counter, when non-nil, tallies
+// every HTTP response for the end-of-run report.
+func New(clientID, clientSecret string, counter *httpstat.Counter) *Client {
+	var transport http.RoundTripper = http.DefaultTransport
+	if counter != nil {
+		transport = counter.Wrap(transport)
+	}
 	return &Client{
 		clientID:     clientID,
 		clientSecret: clientSecret,
-		http:         &http.Client{Timeout: _defaultTimeout},
+		http:         &http.Client{Timeout: _defaultTimeout, Transport: transport},
+		queries:      apiquery.New(),
 	}
 }
+
+// Queries returns the concrete API query templates this client issued, sorted.
+// It is the Sophos half of the run's per-service provenance manifest.
+func (c *Client) Queries() []string { return c.queries.Queries() }
 
 // Bootstrap runs the 3-step auth: get token, then GET /whoami to discover the
 // tenant ID and regional API host. Must be called before any list method.
@@ -67,22 +81,26 @@ func (c *Client) Bootstrap(ctx context.Context) error {
 
 // ListEndpoints returns all endpoints from the regional API (cursor-paginated).
 func (c *Client) ListEndpoints(ctx context.Context) ([]map[string]any, error) {
+	c.queries.Record("GET /endpoint/v1/endpoints")
 	return c.paginate(ctx, "/endpoint/v1/endpoints", url.Values{"pageSize": []string{"100"}}, false)
 }
 
 // ListAlerts returns all open alerts (cursor-paginated).
 func (c *Client) ListAlerts(ctx context.Context) ([]map[string]any, error) {
+	c.queries.Record("GET /common/v1/alerts")
 	return c.paginate(ctx, "/common/v1/alerts", url.Values{"pageSize": []string{"200"}}, false)
 }
 
 // ListUsers returns all users from the Sophos directory.
 // Returns ErrNotLicensed when the directory is unavailable on this license tier.
 func (c *Client) ListUsers(ctx context.Context) ([]map[string]any, error) {
+	c.queries.Record("GET /common/v1/directory/users")
 	return c.paginate(ctx, "/common/v1/directory/users", url.Values{"pageSize": []string{"100"}}, true)
 }
 
 // ListPolicies returns all endpoint policies. Returns ErrNotLicensed on 403/404.
 func (c *Client) ListPolicies(ctx context.Context) ([]map[string]any, error) {
+	c.queries.Record("GET /endpoint/v1/policies")
 	return c.paginate(ctx, "/endpoint/v1/policies", url.Values{"pageSize": []string{"100"}}, true)
 }
 
@@ -99,6 +117,10 @@ func (c *Client) ListDetections(ctx context.Context, days int) ([]map[string]any
 		},
 	}
 	buf, _ := json.Marshal(body)
+
+	c.queries.Record("POST /detections/v1/queries/detections")
+	c.queries.Record("GET /detections/v1/queries/detections/{id}")
+	c.queries.Record("GET /detections/v1/queries/detections/{id}/results")
 
 	// Step 1: submit
 	var submit struct {
@@ -145,6 +167,7 @@ func (c *Client) ListDetections(ctx context.Context, days int) ([]map[string]any
 
 // fetchToken POSTs client credentials and stores the access token.
 func (c *Client) fetchToken(ctx context.Context) error {
+	c.queries.Record("POST https://id.sophos.com/api/v2/oauth2/token")
 	form := url.Values{
 		"grant_type":    []string{"client_credentials"},
 		"client_id":     []string{c.clientID},
@@ -188,6 +211,7 @@ func (c *Client) fetchToken(ctx context.Context) error {
 
 // discoverTenant calls /whoami to set tenantID + baseURL.
 func (c *Client) discoverTenant(ctx context.Context) error {
+	c.queries.Record("GET https://api.central.sophos.com/whoami/v1")
 	var body struct {
 		ID       string `json:"id"`
 		APIHosts struct {

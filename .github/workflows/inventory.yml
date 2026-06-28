@@ -1,0 +1,59 @@
+name: inventory
+
+# Collect the asset inventory and publish it to Google Sheets.
+#
+# On a GitHub-hosted runner the filesystem is ephemeral, so the binary
+# auto-detects this (RUNNER_ENVIRONMENT=github-hosted) and runs Sheets-only — no
+# snapshot/digest is persisted. The hand-authored drift baseline travels with
+# the repo (local/baseline/), so the drift engine and the Findings tab still
+# work. To retain the local tiers instead, run this on a self-hosted runner.
+#
+# Required repository secrets:
+#   GWS_SA_JSON          — the Google service-account JSON (the whole file)
+#   GWS_ADMIN_EMAIL      — super-admin to impersonate via DWD
+#   SHEETS_SPREADSHEET_ID— target spreadsheet (shared with the SA as Editor)
+#   JC_API_KEY           — JumpCloud API key            (optional collector)
+#   SOPHOS_CLIENT_ID     — Sophos Central client id      (optional collector)
+#   SOPHOS_CLIENT_SECRET — Sophos Central client secret  (optional collector)
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 6 * * *" # daily at 06:00 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: inventory
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Write service-account JSON
+        env:
+          GWS_SA_JSON: ${{ secrets.GWS_SA_JSON }}
+        run: |
+          install -m 600 /dev/null "$RUNNER_TEMP/sa.json"
+          printf '%s' "$GWS_SA_JSON" > "$RUNNER_TEMP/sa.json"
+
+      - name: Run inventory
+        env:
+          GWS_SA_JSON_PATH: ${{ runner.temp }}/sa.json
+          GWS_ADMIN_EMAIL: ${{ secrets.GWS_ADMIN_EMAIL }}
+          SHEETS_SPREADSHEET_ID: ${{ secrets.SHEETS_SPREADSHEET_ID }}
+          JC_API_KEY: ${{ secrets.JC_API_KEY }}
+          SOPHOS_CLIENT_ID: ${{ secrets.SOPHOS_CLIENT_ID }}
+          SOPHOS_CLIENT_SECRET: ${{ secrets.SOPHOS_CLIENT_SECRET }}
+          LOG_LEVEL: INFO
+        run: go run ./cmd/inventory all

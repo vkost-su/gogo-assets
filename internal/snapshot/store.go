@@ -48,9 +48,27 @@ func (s *Store) BaselineDir() string { return filepath.Join(s.root, tierBaseline
 // CurrentDir is the absolute current tier path.
 func (s *Store) CurrentDir() string { return filepath.Join(s.root, tierCurrent) }
 
+// DailyDir is the absolute daily tier path, parent of the dated <run_date>/
+// mirror directories.
+func (s *Store) DailyDir() string { return filepath.Join(s.root, tierDaily) }
+
 // path joins one or more elements under the store root.
 func (s *Store) path(elem ...string) string {
 	return filepath.Join(append([]string{s.root}, elem...)...)
+}
+
+// EnsureDirs materialises the full tier tree (baseline/current/daily/archive)
+// under the local root. Individual writes create their own parent directory
+// lazily, so this is only needed to lay out the empty structure up front — e.g.
+// on a self-hosted runner or a fresh local checkout where a persistent run is
+// expected to populate it.
+func (s *Store) EnsureDirs() error {
+	for _, tier := range []string{tierBaseline, tierCurrent, tierDaily, tierArchive} {
+		if err := os.MkdirAll(s.path(tier), 0o755); err != nil {
+			return fmt.Errorf("ensure %s tier: %w", tier, err)
+		}
+	}
+	return nil
 }
 
 // WriteSnapshot serialises snap to both current/snapshot.json (the live working
@@ -63,6 +81,50 @@ func (s *Store) WriteSnapshot(snap model.Snapshot) (Result, error) {
 	}
 	current := s.path(tierCurrent, "snapshot.json")
 	daily := s.path(tierDaily, snap.RunDate, "snapshot.json")
+	for _, p := range []string{current, daily} {
+		if err := writeAtomic(p, buf); err != nil {
+			return Result{}, err
+		}
+	}
+	return Result{Path: current, SizeBytes: int64(len(buf))}, nil
+}
+
+// WriteInventory serialises the rich asset inventory — the source of truth the
+// Sheets tabs render from — to both current/inventory.json (the live working
+// copy the `sheets` command publishes from) and daily/<run_date>/inventory.json
+// (retained history, pruned with the daily tier). Both writes are atomic.
+//
+// inv is taken as any so the store stays free of an import on package inventory;
+// callers pass a *inventory.AssetInventory.
+func (s *Store) WriteInventory(inv any, runDate string) (Result, error) {
+	buf, err := marshal(inv)
+	if err != nil {
+		return Result{}, fmt.Errorf("marshal inventory: %w", err)
+	}
+	current := s.path(tierCurrent, "inventory.json")
+	daily := s.path(tierDaily, runDate, "inventory.json")
+	for _, p := range []string{current, daily} {
+		if err := writeAtomic(p, buf); err != nil {
+			return Result{}, err
+		}
+	}
+	return Result{Path: current, SizeBytes: int64(len(buf))}, nil
+}
+
+// WriteSaaS serialises the standalone SaaS export — the full nested SaaSApp
+// structures that back the SaaS sheet tab — to both current/saas.json (the live
+// working copy) and daily/<run_date>/saas.json (retained history, pruned with
+// the daily tier). Both writes are atomic.
+//
+// export is taken as any so the store stays free of an import on the jumpcloud
+// package; callers pass a jumpcloud.SaaSExport.
+func (s *Store) WriteSaaS(export any, runDate string) (Result, error) {
+	buf, err := marshal(export)
+	if err != nil {
+		return Result{}, fmt.Errorf("marshal saas: %w", err)
+	}
+	current := s.path(tierCurrent, "saas.json")
+	daily := s.path(tierDaily, runDate, "saas.json")
 	for _, p := range []string{current, daily} {
 		if err := writeAtomic(p, buf); err != nil {
 			return Result{}, err

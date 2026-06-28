@@ -6,8 +6,10 @@ into a single people-and-devices view, assembles a canonical snapshot, runs a
 drift engine against an approved baseline, and publishes the results to tiered
 local storage and Google Sheets.
 
-The whole thing is one binary, one run, no daemon: collect → correlate →
-assemble → detect drift → persist → publish.
+The main orchestrator is one binary, one run, no daemon: collect → correlate →
+assemble → detect drift → persist → publish. Each external integration is also
+wrapped as a uniform service module, so standalone service binaries and future
+connectors use the same lifecycle instead of growing one-off code paths.
 
 ---
 
@@ -15,6 +17,7 @@ assemble → detect drift → persist → publish.
 
 - [What it does](#what-it-does)
 - [Quick start](#quick-start)
+- [Guide](#guide)
 - [The pipeline](#the-pipeline)
 - [Data model — the global structures](#data-model--the-global-structures)
 - [Cross-source correlation](#cross-source-correlation)
@@ -30,7 +33,8 @@ assemble → detect drift → persist → publish.
 ## What it does
 
 1. **Collect** — pulls users, devices, login activity, and OAuth tokens (Google
-   Workspace); systems, directory users, and policy statuses (JumpCloud); and
+   Workspace); systems, directory users, policy statuses, and **SaaS applications**
+   (owner accounts, licenses, usage — JumpCloud AI & SaaS Management); and
    endpoints, tamper protection, health, alerts, and detections (Sophos Central).
 2. **Correlate** — merges everything into one **email-keyed** view of people and
    joins each physical device's JumpCloud and Sophos records together.
@@ -42,7 +46,7 @@ assemble → detect drift → persist → publish.
    census.
 5. **Persist** — writes to tiered local storage (current / daily / archive) via
    atomic writes.
-6. **Publish** — writes five Google Sheets tabs and a compact, findings-first
+6. **Publish** — writes six Google Sheets tabs and a compact, findings-first
    `digest.json` sized to fit a downstream analyst's context budget.
 
 ---
@@ -53,10 +57,31 @@ Requires **Go 1.25+** and a Google Workspace service-account JSON with
 Domain-Wide Delegation.
 
 ```bash
-cp .env.example .env        # fill in credentials
+cp .env.example .env        # fill in credentials (repo-root .env), or use ~/.config (below)
 make build                  # compiles bin/inventory
 ./bin/inventory all         # full run: collect, correlate, drift, sheets
 ```
+
+**Where credentials live.** The binary looks for `.env` in the working directory
+first, and if absent falls back to `~/.config/gogo-assets/.env`
+(`$XDG_CONFIG_HOME/gogo-assets/.env`). The recommended setup keeps **both** the
+`.env` and the service-account key outside the repo tree:
+
+```bash
+mkdir -p ~/.config/gogo-assets
+cp .env.example ~/.config/gogo-assets/.env       # fill in credentials
+cp /path/to/your-sa.json ~/.config/gogo-assets/sa.json
+# in that .env:  GWS_SA_JSON_PATH=~/.config/gogo-assets/sa.json
+./bin/inventory all                               # run from anywhere; .env is found via XDG
+```
+
+> **Never commit the Google service-account JSON** — it carries a private key.
+> Keeping it in `~/.config/gogo-assets/` (outside the repo) is safest. If you do
+> keep credentials inside the tree, the `.gitignore` safety nets catch them
+> (`.env`, `*-sa.json`, `*service-account*.json`, `*-sdk-*.json`, and any
+> `*.json` under `cmd/inventory/`). Live snapshots under `local/current`,
+> `local/daily`, and `local/archive` are runtime data and are gitignored too —
+> only the hand-authored `local/baseline/` is tracked.
 
 Common variations:
 
@@ -65,11 +90,278 @@ Common variations:
 ./bin/inventory gw                      # collect Google Workspace only
 ./bin/inventory all --json --no-sheets  # print the canonical snapshot to stdout
 ./bin/inventory all --approve-baseline  # anchor the census for NEW/GONE detection
+./bin/inventory help                    # full usage: targets, commands, flags, --tabs keys
+./bin/inventory version                 # build revision/time from the embedded build info
 ```
 
-Targets are `gw | jc | sp | all` (default `all`). The drift engine runs **only**
-on `all` — a partial run would false-positive the census diff by flagging every
-uncollected entity as gone. Targets and flags are order-independent.
+### Publishing to Sheets on demand
+
+Every run persists the full collected data to `local/current/inventory.json` —
+the **source of truth** the Sheets tabs render from. The `sheets` command
+republishes from that file at any time, **without collecting**:
+
+```bash
+./bin/inventory sheets                       # republish every populated tab from the last run
+./bin/inventory sheets --tabs jc,saas        # rewrite only those two tabs; others untouched
+./bin/inventory sheets --run-date 2026-06-15 # publish a specific dated snapshot, not the latest
+./bin/inventory sheets --dry-run             # log which tabs would be written; touch no API
+./bin/inventory all --tabs usersall          # collect everything, but write only the UsersAll tab
+```
+
+`--tabs` takes a comma list of `gw, jc, saas, sophos, usersall, findings` (or
+`all`); it filters both the `sheets` command and the auto-write after a normal
+run. A tab with no data is **skipped, never recreated empty**, so a partial run
+or selective publish never clobbers a populated tab.
+
+Every run also mirrors its inventory to `local/daily/<run_date>/inventory.json`.
+`--run-date <YYYY-MM-DD>` republishes from that dated mirror instead of
+`current/` — handy for re-pushing an earlier day's snapshot. `--dry-run` walks
+every gate (target, `--tabs` selection, data availability) and logs the tabs it
+*would* write without opening the Google API — a safe way to verify a
+`--tabs`/`--run-date` combination. Both flags are valid only with the `sheets`
+command.
+
+Targets/commands are `gw | jc | sp | all | sheets | help | version` (default
+`all`). The drift engine runs **only** on `all` — a partial run would
+false-positive the census diff by flagging every uncollected entity as gone.
+Targets and flags are order-independent; run `inventory help` for the full
+reference.
+
+---
+
+## Guide
+
+A practical, end-to-end walkthrough: get credentials in place, run the binary,
+and use every command the way it's meant to be used. For the *why* behind each
+stage, follow the cross-links into [The pipeline](#the-pipeline) and the
+[Drift engine reference](#drift-engine-reference).
+
+### 1. Prerequisites
+
+| Need | Why | Required? |
+|---|---|---|
+| **Go 1.25+** | builds the single binary | yes |
+| **Google Workspace SA + DWD** | the only required collector; also authorises the Sheets write | yes |
+| **A target spreadsheet** | where the six tabs are written | only to publish |
+| **JumpCloud API key** | systems, directory users, **SaaS apps** | optional collector |
+| **Sophos Central client id/secret** | endpoints, health, alerts | optional collector |
+
+Any optional collector with no credentials is **skipped silently** — its tab is
+simply not written. So you can start with just Google Workspace and add the rest
+later.
+
+### 2. One-time setup
+
+**a. Create the Google service account.** In Google Cloud, create a service
+account, enable Domain-Wide Delegation, and download its JSON key. In the Admin
+console, authorise the SA client ID for these scopes (one comma-separated line,
+exactly as in [`.env.example`](.env.example)):
+
+```
+https://www.googleapis.com/auth/admin.directory.user.readonly,
+https://www.googleapis.com/auth/admin.directory.user.security,
+https://www.googleapis.com/auth/admin.directory.device.mobile.readonly,
+https://www.googleapis.com/auth/admin.reports.audit.readonly,
+https://www.googleapis.com/auth/spreadsheets
+```
+
+**b. Put credentials where the loader finds them.** The `.env` is read from the
+working directory first, else `~/.config/gogo-assets/.env`. Keeping both the
+`.env` and the key **outside the repo** is the recommended setup:
+
+```bash
+mkdir -p ~/.config/gogo-assets
+cp .env.example ~/.config/gogo-assets/.env       # then fill it in
+cp /path/to/sa.json ~/.config/gogo-assets/sa.json
+# in that .env:
+#   GWS_SA_JSON_PATH=~/.config/gogo-assets/sa.json
+#   GWS_ADMIN_EMAIL=admin@yourdomain.com
+#   SHEETS_SPREADSHEET_ID=<id from the sheet URL>
+```
+
+OS environment variables always override file values — that's how CI injects
+secrets without a file.
+
+**c. Share the spreadsheet.** Add the **SA's email** as an **Editor** on the
+target spreadsheet, or the Sheets write returns a 403.
+
+**d. Build and smoke-test.**
+
+```bash
+make build                       # → bin/inventory
+./bin/inventory version          # prints build revision/time
+./bin/inventory gw --no-sheets   # GWS-only, no writes — fastest way to prove creds work
+```
+
+**e. Anchor the drift baseline.** The first full run has nothing to diff against.
+Once a run looks right, capture it as the approved census so future runs can flag
+NEW / GONE entities:
+
+```bash
+./bin/inventory all --approve-baseline   # writes local/baseline/baseline.meta.json
+```
+
+Edit `local/baseline/classes.json` to pin the security posture you expect
+(disk encryption, MFA, tamper protection …) — see
+[Tuning the baseline](#6-tuning-the-drift-baseline) below.
+
+### 3. Commands & targets
+
+```
+inventory [target|command] [flags]
+```
+
+| Invocation | What it does |
+|---|---|
+| `inventory all` | **default** — collect every source, correlate, run drift, publish all tabs |
+| `inventory gw` | collect Google Workspace only (+ its tab) |
+| `inventory jc` | collect JumpCloud only, **incl. SaaS** (+ JC & SaaS tabs) |
+| `inventory sp` | collect Sophos only (+ its tab) |
+| `inventory sheets` | re-publish tabs from the **last persisted run** — no collection |
+| `inventory help` | full usage reference |
+| `inventory version` | build provenance from the embedded VCS info |
+
+Targets and flags are **order-independent** (`inventory --json all` ==
+`inventory all --json`). Drift runs **only** on `all`.
+
+### 4. Flags reference
+
+| Flag | Applies to | Effect |
+|---|---|---|
+| `--no-sheets` | collection | collect + drift, skip the Sheets write |
+| `--json` | collection | also print the canonical snapshot JSON to stdout |
+| `--tabs <list>` | collection & `sheets` | comma list of `gw,jc,saas,sophos,usersall,findings` (or `all`); write only those |
+| `--approve-baseline` | `all` | anchor the current entity set as the census, skip drift |
+| `--approve-from-current` | — | re-approve the census from the **on-disk** snapshot, then exit (no collection) |
+| `--run-date <YYYY-MM-DD>` | `sheets` | publish a dated `daily/` mirror instead of `current/` |
+| `--dry-run` | `sheets` | log which tabs *would* be written; touch no Google API |
+| `--prune` | collection | prune expired daily/archive tiers after the run (default `true`; `--prune=false` to keep) |
+
+### 5. Advanced usage cookbook
+
+**Publish without re-collecting.** Every run persists `current/inventory.json`;
+the `sheets` command renders from it at any time:
+
+```bash
+./bin/inventory sheets                       # re-push every populated tab
+./bin/inventory sheets --tabs saas           # rewrite just the SaaS tab
+./bin/inventory sheets --run-date 2026-06-15 # re-push a specific day's snapshot
+./bin/inventory sheets --dry-run             # verify a --tabs/--run-date combo, no API
+```
+
+**Collect everything but write one tab.** `--tabs` also gates the auto-write
+after a normal run:
+
+```bash
+./bin/inventory all --tabs usersall          # full collect+drift, publish only UsersAll
+```
+
+A tab with no data is **skipped, never recreated empty**, so a partial run never
+clobbers a populated tab.
+
+**Inspect the snapshot offline.** Pipe the canonical JSON into `jq` without
+touching Sheets:
+
+```bash
+./bin/inventory all --json --no-sheets | jq '.jumpcloud.saas[] | {name, status, category}'
+```
+
+**Read the persisted artifacts.** After a persistent run, everything lives under
+`local/current/`:
+
+```bash
+jq '.applications[] | select(.status=="UNAPPROVED") | .name' local/current/saas.json
+jq '.counts'   local/current/digest.json     # findings by severity / kind
+jq '.[].kind'  local/current/findings.json   # the raw findings feeding the tab
+```
+
+**Tune SaaS collection.** `JC_SAAS_USAGE_DAYS` (1–90, default 30) sets the
+trailing window for the per-account *last-used* join. SaaS device-agent accounts
+with no own identity are attributed to the device owner or dropped — set
+`LOG_LEVEL=DEBUG` to see the `skipped_accounts` count and the raw fields of any
+dropped record.
+
+**Speed up a slow SaaS run.** Collecting hundreds of apps makes thousands of
+JumpCloud calls; firing them in a burst trips JumpCloud's rate limit, and the
+429-driven exponential backoff is what turns a ~2-minute job into ~30 minutes.
+The client holds itself to a steady `JC_MAX_RPS` (default 8 req/s) shared across
+all collectors so the limit is rarely tripped. If logs still show repeated 429s,
+lower it (`JC_MAX_RPS=5`); if your org's quota is higher and collection feels
+slow, raise it (`JC_MAX_RPS=15`).
+
+Every run logs the HTTP volume to gauge this — once right after collection and
+again in the final summary, as `http requests total=… status_200=…
+status_429=… status_500=…` (one `status_<code>` per code seen, plus `errors` for
+transport failures). A non-trivial `status_429` count means you're still being
+throttled — lower `JC_MAX_RPS`.
+
+**Throttle / quieten a run.** `ENRICH_DELAY_S` adds a per-user delay to the GWS
+enrichment (use if you hit rate limits); `LOG_LEVEL=DEBUG|INFO|WARN|ERROR`
+controls verbosity; `DIGEST_MAX_BYTES` caps `digest.json` (it truncates by
+severity to fit).
+
+**Choose where output lands.** The run auto-detects ephemeral vs persistent (see
+[Running in CI](#running-in-ci--github-actions)); force it with
+`LOCAL_PERSIST=true|false`:
+
+```bash
+LOCAL_PERSIST=false ./bin/inventory all      # Sheets only, write nothing locally
+LOCAL_PERSIST=true  ./bin/inventory all      # force-persist even from a hosted runner
+```
+
+### 6. Tuning the drift baseline
+
+`local/baseline/classes.json` is **pure configuration** — edit it freely, no
+recompile. A class matches entities by canonical field name (AND-ed) and pins the
+monitored fields it expects:
+
+```json
+{
+  "id": "jc-device-macos",
+  "priority": 10,
+  "match": { "os_family": "darwin" },
+  "expected": {
+    "disk_encrypted": "true",
+    "mdm_enrolled": { "value": "true", "severity": "crit" }
+  }
+}
+```
+
+`baseline.validate()` catches a typo'd field name **at startup**, so a broken
+class fails fast rather than silently mis-classifying. After changing the
+*set* of entities you consider approved (not their posture), re-anchor the census
+with `--approve-baseline` or `--approve-from-current`. Full field list and finding
+kinds: [Drift engine reference](#drift-engine-reference).
+
+### 7. Typical workflows
+
+```bash
+# Daily operator run (local, persistent)
+./bin/inventory all
+
+# Iterate on the SaaS tab after tweaking a category mapping — no re-collect
+./bin/inventory sheets --tabs saas
+
+# Re-approve the baseline from yesterday's snapshot without hitting any API
+./bin/inventory --approve-from-current
+
+# CI (GitHub-hosted): collect + publish, nothing persisted — see the workflow file
+go run ./cmd/inventory all
+```
+
+### 8. Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `missing required env var: GWS_SA_JSON_PATH` | `.env` not found or var unset — check the working dir / `~/.config/gogo-assets/.env` |
+| `GWS_SA_JSON_PATH not accessible` | path wrong or `~` not expanded by your shell — use an absolute path |
+| Sheets write 403 | share the spreadsheet with the **SA email** as Editor; confirm the `spreadsheets` scope is authorised |
+| SaaS tab never appears | JumpCloud **AI & SaaS Management** not licensed (calls fold to empty) or `JC_API_KEY` unset |
+| Findings tab empty | drift runs only on `all`, and only with a `classes.json` baseline present |
+| Every entity flagged `NEW_ENTITY` | no census yet — run `--approve-baseline` once |
+| Nothing written anywhere in CI | ephemeral run with no `SHEETS_SPREADSHEET_ID` (a `WARN` says so) |
+
+Run `make check` (fmt-check + vet + race) before any PR.
 
 ---
 
@@ -115,17 +407,22 @@ Both are derived from the same collector run in `collect()`
 
 ### 1. Collect
 
-`collect()` runs the selected per-source collectors concurrently-per-source and
-feeds each result into **both** sinks:
+`collect()` runs the selected service modules from the registry and feeds each
+result into **both** sinks:
 
-| Source | Collector | Raw type(s) | Fed into |
+| Source | Module / collector | Raw type(s) | Fed into |
 |---|---|---|---|
-| Google Workspace | `gworkspace.Collector.CollectAll` | `map[email]*UserRecord` | `inv.AddGoogle` + `src.GWS` |
-| JumpCloud | `jumpcloud.Collector.CollectAll` | `[]System`, `map[email]User` | `inv.AddJC` + `src.JCSystems/JCUsers` |
-| Sophos | `sophos.Collector.CollectAll` | `[]Endpoint` | `inv.AddSophos` + `src.Endpoints` |
+| Google Workspace | `service.GoogleWorkspaceModule` → `gworkspace.Collector.CollectAll` | `map[email]*UserRecord` | `inv.AddGoogle` + `src.GWS` |
+| JumpCloud | `service.JumpCloudModule` → `jumpcloud.Collector.CollectAll` | `[]System`, `map[email]User` | `inv.AddJC` + `src.JCSystems/JCUsers` |
+| JumpCloud SaaS | inside `service.JumpCloudModule` → `jumpcloud.SaaSCollector.CollectAll` | `[]SaaSApp` | `inv.SaaSApps` + `src.JCSaaS` |
+| Sophos | `service.SophosModule` → `sophos.Collector.CollectAll` | `[]Endpoint` | `inv.AddSophos` + `src.Endpoints` |
 
 A collector with absent credentials is **skipped silently**, not failed — its
-shard is simply empty downstream.
+shard is simply empty downstream. The SaaS collector reuses the JumpCloud client
+and runs only when `JC_API_KEY` is set; if **AI & SaaS Management** is not
+licensed its calls fold to empty (like System Insights) and no SaaS tab is written.
+Google Workspace is the required identity spine; optional modules such as
+JumpCloud and Sophos are skipped when unconfigured.
 
 ### 2. Unify (inventory)
 
@@ -147,9 +444,25 @@ entity. Output is deterministic: identical input → byte-identical snapshot.
 
 ### 4. Persist
 
-`store.WriteSnapshot(snap)` writes the canonical snapshot to both
+`store.WriteSnapshot(snap)` writes the canonical (lean) snapshot to both
 `current/snapshot.json` (live working copy) and `daily/<run_date>/snapshot.json`
 (retained history), each via atomic temp-file + rename.
+
+`store.WriteInventory(inv)` then persists the **rich** `inventory.AssetInventory`
+to `current/inventory.json` (+ a daily mirror). This is the **source of truth the
+Sheets tabs render from** — a superset of the lean snapshot that keeps everything
+the canonical model drops (JC hardware/software/policies/SSH/USB, GWS
+connected-apps, and the cross-source device join). The `sheets` command
+([Publishing to Sheets on demand](#publishing-to-sheets-on-demand)) republishes
+the tabs purely from this file, with no collection.
+
+When SaaS apps were collected, `store.WriteSaaS(export)` also writes a
+**standalone** `current/saas.json` (+ a daily mirror) — the full nested
+`jumpcloud.SaaSApp` structures that back the SaaS tab (owner accounts, license
+tiers, contract, SSO connections), wrapped with run provenance
+(`schema_version`, `run_date`, `run_timestamp`, `count`) and ordered exactly as
+the tab. It is skipped on an unlicensed/partial run so an empty file never
+clobbers a populated one.
 
 ### 5. Drift engine
 
@@ -172,7 +485,7 @@ current entity set as the baseline for future NEW/GONE detection.
 
 ### 6. Publish (Sheets)
 
-`writeSheets()` writes five tabs (gated by target + data availability). Four are
+`writeSheets()` writes six tabs (gated by target + data availability). Five are
 built from the **inventory view**; the Findings tab is built from the **drift
 findings**. See the [tab mapping](#sheets-tabs--which-structure-builds-which-table).
 
@@ -251,7 +564,7 @@ type Snapshot struct {
     SchemaVersion   string
     RunDate         string         // YYYY-MM-DD
     RunTimestamp    time.Time      // exact UTC instant
-    JumpCloud       JumpCloudShard // Devices[] · Identity[] · PolicyEnforcement[]
+    JumpCloud       JumpCloudShard // Devices[] · Identity[] · PolicyEnforcement[] · SaaS[]
     Sophos          SophosShard    // Endpoints[] · AccountHealth
     GoogleWorkspace GWSShard       // Identity[] · Devices[]
 }
@@ -262,6 +575,7 @@ type Snapshot struct {
 | `JCDevice` | ✅ | monitored: `DiskEncrypted` (crit), `MDMEnrolled` (med) |
 | `JCUser` | ✅ | monitored: `MFAEnabled` (crit), `PasswordNeverExpires` (med), `JumpCloudGoEnabled` (low) |
 | `JCPolicyEnforcement` | — | per-policy rollup, dashboard only (not classified) |
+| `SaaSApp` | — | JumpCloud SaaS app + nested accounts / licenses / contract; store-only (not classified) |
 | `SophosEndpoint` | ✅ | monitored: `TamperProtection` (crit) |
 | `SophosAccountHealth` | — | tenant-level rollup, derived not collected |
 | `GWSUser` | ✅ | monitored: `MFAEnabled` (crit), `MFAEnforced`/`IsAdmin`/`ASPCount` (high), backup codes / 3p tokens (med) |
@@ -346,16 +660,59 @@ regardless of what Sophos thinks the login is.
 
 ## Sheets tabs — which structure builds which table
 
-`writeSheets()` ([`cmd/inventory/main.go`](cmd/inventory/main.go)) writes five
+`writeSheets()` ([`cmd/inventory/main.go`](cmd/inventory/main.go)) writes six
 tabs. The first column lists the default tab name (overridable via env).
 
 | Tab (default name) | Built from | Row unit | Writer |
 |---|---|---|---|
 | **GoogleWorkspace** | `[]*UnifiedUserRecord` | one user | `WriteGWS` |
 | **JumpCloud** | `JCSystemRow{System, User}` from `JCSystems` + `JCUsers` | one system (+ owner) | `WriteJC` |
+| **SaaS** | `[]jumpcloud.SaaSApp` from `SaaSApps` | one SaaS application | `WriteSaaS` |
 | **Sophos** | `[]sophos.Endpoint` from `SophosEndpoints` | one endpoint | `WriteSophos` |
 | **UsersAll** | `[]*UnifiedUserRecord` | one user (cross-source merged) | `WriteMerged` |
 | **Findings** | `[]model.Finding` (drift output) | one finding | `WriteFindings` |
+
+#### SaaS column groups
+
+One row per discovered application, grouped by derived **Category** then name:
+
+| Group | Columns | Source |
+|---|---|---|
+| Service | Name · **Category** · Status · Domains · Discovery | catalog + app status (yellow=`Newly Discovered`, red=`Unapproved`) |
+| Access | Restriction · SSO · Owner | access restriction, SSO connection state, resolved owner email |
+| Accounts | Count · **Owner Accounts** · Last Used | owner accounts (emails + last-used in a wrapped detail cell); device-agent accounts dropped |
+| Licenses | Seats (Assigned/Total) · Cost/yr · Renewal · Term | per-app license tiers + contract (yellow when seats sit unassigned) |
+
+**Category is a derived heuristic** — the JumpCloud public SaaS API exposes no
+category taxonomy, so `deriveCategory` ([`internal/jumpcloud/saas_category.go`](internal/jumpcloud/saas_category.go))
+maps each app to a coarse purpose bucket from its name/domains; unmatched apps
+fall through to `Other`.
+
+**Device-agent accounts are attributed to the device owner, not shown as a bare
+ID.** The accounts endpoint surfaces JumpCloud device-agent accounts as a bare
+ObjectID with no email or username (e.g. `6a31d22952c3e10001285cdb`) — the SaaS
+usage was discovered *on a managed device*. `mapSaaSAccounts`
+([`internal/jumpcloud/saas_mapper.go`](internal/jumpcloud/saas_mapper.go)) resolves
+such an account's `user_id` through the directory to the device owner and keeps
+it with `device_owner` set (shown as `owner@… (via device)` in the **Owner
+Accounts** cell). Only accounts with no own identity *and* no resolvable owner
+are dropped; the count is logged as `skipped_accounts`, and the raw fields of one
+dropped record are logged at `DEBUG` so any further attribution handle the API
+offers can be wired in.
+
+Beyond the tab, every run writes a standalone `local/current/saas.json`
+(+ a daily mirror) with the full nested SaaS structures — see
+[Persist](#4-persist).
+
+**SaaS is store-only — a deliberate scope decision, not a gap.** App **Status**
+(`NEWLY_DISCOVERED` / `UNAPPROVED`) is a strong shadow-IT signal, surfaced as a
+red/yellow cell on the tab rather than a drift finding. SaaS apps are *not*
+classified: `model.SaaSApp` carries no monitored (`drift:"monitored"`) fields,
+and `ToSaaSApp` populates none. This keeps the `FindingKind` set closed at six
+and the `digest` contract untouched. Promoting SaaS Status into findings would
+mean either a new monitored pointer field + census entry within the closed set,
+or extending `FindingKind` (which breaks the digest schema) — both are out of
+scope here and require an explicit decision before wiring.
 
 Every tab uses the same layout engine
 ([`internal/sheets/writer.go`](internal/sheets/writer.go)): a merged group-header
@@ -390,19 +747,37 @@ takes precedence). See [`.env.example`](.env.example) for the full list. Missing
 **required** variables abort at startup; optional collectors are skipped silently
 when their credentials are absent.
 
+**`.env` discovery.** With no explicit path, the loader reads `./.env` from the
+working directory if present, otherwise `$XDG_CONFIG_HOME/gogo-assets/.env`
+(default `~/.config/gogo-assets/.env`). This lets you keep the `.env` and the
+service-account JSON outside the repo — e.g. `~/.config/gogo-assets/.env` +
+`~/.config/gogo-assets/sa.json` with `GWS_SA_JSON_PATH=~/.config/gogo-assets/sa.json`
+(`~/` is expanded). OS environment variables still override file values.
+
+**Service-specific validation.** The full `inventory` orchestrator uses
+`config.Load`, which requires Google Workspace because it is the identity spine
+and authorises Sheets. Standalone service binaries use `config.LoadWithOptions`
+instead, so `jc` validates `JC_API_KEY` without requiring Google credentials, and
+`sophos` validates only Sophos credentials. New service binaries should follow
+that pattern rather than adding their own env parser.
+
 | Variable | Default | Purpose |
 |---|---|---|
 | `GWS_SA_JSON_PATH`, `GWS_ADMIN_EMAIL` | — (required) | Google SA + delegated admin |
 | `GWS_CUSTOMER_ID` | `my_customer` | Google Workspace customer |
 | `JC_API_KEY`, `JC_ORG_ID` | — | JumpCloud (skipped if unset) |
+| `JC_SAAS_USAGE_DAYS` | `30` | SaaS usage window in days (1–90) |
+| `JC_MAX_RPS` | `8` | steady JumpCloud request-rate cap (req/s); smooths bursts so 429s/backoff are rare |
 | `SOPHOS_CLIENT_ID`, `SOPHOS_CLIENT_SECRET` | — | Sophos (skipped if unset) |
 | `SHEETS_SPREADSHEET_ID` | — | target spreadsheet (skipped if unset) |
 | `SHEETS_GW_WORKSHEET` | `GoogleWorkspace` | per-source tab names |
 | `SHEETS_JC_WORKSHEET` | `JumpCloud` | |
+| `SHEETS_SAAS_WORKSHEET` | `SaaS` | JumpCloud SaaS apps tab |
 | `SHEETS_SP_WORKSHEET` | `Sophos` | |
 | `SHEETS_MERGED_WORKSHEET` | `UsersAll` | cross-source summary tab |
 | `SHEETS_FINDINGS_WORKSHEET` | `Findings` | drift-findings tab |
 | `LOCAL_DIR`, `BASELINE_DIR` | `./local`, `./local/baseline` | storage roots |
+| `LOCAL_PERSIST` | auto | force storage mode (`true`/`false`); auto ⇒ ephemeral on a GitHub-hosted runner, persist otherwise |
 | `DIGEST_MAX_BYTES` | — | digest size budget (truncates by severity) |
 | `LOG_LEVEL` | `INFO` | structured-log level |
 
@@ -452,12 +827,42 @@ freely, no recompile. A class matches entities by canonical JSON field name
 | Tier | Path | Contents | Retention |
 |---|---|---|---|
 | baseline | `local/baseline/` | `classes.json`, `baseline.meta.json` | permanent (hand-authored, tracked) |
-| current | `local/current/` | `snapshot.json`, `classification.json`, `digest.json` | overwritten each run |
-| daily | `local/daily/YYYY-MM-DD/` | full `snapshot.json` | 30 days |
+| current | `local/current/` | `snapshot.json`, `inventory.json`, `saas.json`, `classification.json`, `digest.json`, `findings.json` | overwritten each run |
+| daily | `local/daily/YYYY-MM-DD/` | `snapshot.json`, `inventory.json`, `saas.json` | 30 days |
 | archive | `local/archive/` | `<run_date>_digest.json` | 180 days |
 
 `--prune` (default on) deletes expired daily/archive entries after each run. All
 writes are atomic (temp-file + rename).
+
+---
+
+## Running in CI / GitHub Actions
+
+The binary adapts to where it runs, so the same `inventory all` works locally and
+in CI:
+
+- **Ephemeral (Sheets-only).** On a **GitHub-hosted runner** the filesystem is
+  thrown away when the job ends, so persisting the local tiers is pointless. The
+  run detects this (`RUNNER_ENVIRONMENT=github-hosted`) and writes **only Google
+  Sheets** — no `snapshot.json` / `inventory.json` / `saas.json` / `digest.json`,
+  no prune. The drift engine still runs and feeds the Findings tab; its baseline
+  travels with the repo (`local/baseline/`, tracked). `Sheets` rendering reads
+  the in-memory inventory, so nothing on disk is needed.
+- **Persistent.** A **self-hosted runner** or a **local machine** writes the full
+  tiers as usual, and on startup `EnsureDirs` lays out
+  `local/{baseline,current,daily,archive}` so a fresh checkout has the structure
+  ready.
+
+Set `LOCAL_PERSIST=true|false` to force either mode (it overrides the
+auto-detection — handy to persist from a hosted runner that mounts a volume, or
+to dry-run Sheets-only locally). `--approve-baseline` is ignored on an ephemeral
+run, since the baseline write would not survive — approve on a persistent host
+and commit `local/baseline/`.
+
+A ready-to-edit workflow lives at
+[`.github/workflows/inventory.yml`](.github/workflows/inventory.yml): it runs on
+a schedule (and on demand), writes the service-account JSON from a secret, and
+invokes `inventory all`. Populate the repository secrets it lists at the top.
 
 ---
 
@@ -482,12 +887,19 @@ temp directory with no network calls.
 
 ```
 cmd/inventory/        CLI entrypoint (flag parsing, orchestration, drift wiring)
+cmd/gw/               standalone Google Workspace service binary
+cmd/jc/               standalone JumpCloud service binary
+cmd/sophos/           standalone Sophos service binary
 internal/
   model/              canonical snapshot schema + Finding types (single source of truth)
   config/             env/.env loader
   logging/            structured slog handler
+  httpstat/           shared request-counting RoundTripper (HTTP totals + per-status report)
+  service/            uniform service-module contract, registry, and collect runner
+  servicecli/         shared runner for standalone service binaries
   gworkspace/         Google Workspace collector  (+ to_model converter)
   jumpcloud/          JumpCloud collector          (+ to_model converter)
+                      + SaaS App Management (saas_client/collector/mapper/category/to_model)
   sophos/             Sophos Central collector     (+ to_model converter)
   inventory/          cross-source unification (email-keyed people + device join)
   assemble/           raw collector output → model.Snapshot (the one seam)
@@ -510,3 +922,16 @@ knows both the raw collector types and the canonical model. This keeps the engin
 testable offline with hand-crafted snapshots, and keeps the two views
 ([inventory](#the-unified-inventory-sheets-facing) and
 [canonical](#the-canonical-snapshot-engine-facing)) cleanly decoupled.
+
+**Service-module invariant:** `cmd/inventory` does not know how a provider talks
+to its API. It asks `internal/service.Registry` for the modules selected by the
+target (`gw`, `jc`, `sp`, or `all`), then each module follows the same lifecycle:
+configuration gate → client → collector → typed raw output → inventory ingest →
+canonical source append → API query provenance. Adding Jira, PeopleForce, or any
+other provider should follow that contract: create `internal/<service>/` for the
+client, raw model, mapper, collector, and `to_model` converter; add a module that
+satisfies `service.Module`; register it in `service.DefaultRegistry`; and extend
+the canonical snapshot only where the new service has real entities to store.
+Standalone binaries should be thin wrappers around `servicecli.Run`, which owns
+the common `--json` / `--no-persist` flags, config loading, signal handling,
+HTTP/query logs, JSON output, and raw artifact persistence.

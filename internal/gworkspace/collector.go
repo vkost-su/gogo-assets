@@ -5,8 +5,18 @@ import (
 	"log/slog"
 	"time"
 
+	"gogo-assets/internal/collector"
 	"gogo-assets/internal/logging"
 )
+
+// Compile-time check that Collector satisfies the collector.Collector interface.
+var _ collector.Collector = (*Collector)(nil)
+
+// Output holds the results of a completed GWS collection.
+type Output struct {
+	Records map[string]*UserRecord `json:"records"` // keyed by primary email
+	Queries []string               `json:"queries"` // concrete API query templates issued this run
+}
 
 const (
 	defaultWindowDays = 7
@@ -27,13 +37,15 @@ type CollectorOpts struct {
 //  4. Assembly    — already done in steps 1–3
 type Collector struct {
 	client      *Client
+	out         *Output
 	windowDays  int
 	enrichDelay time.Duration
 	log         *slog.Logger
 }
 
-// NewCollector wraps an authenticated client.
-func NewCollector(c *Client, opts CollectorOpts) *Collector {
+// NewCollector wraps an authenticated client. out is the sink that CollectAll
+// writes results into; the caller retains a typed reference for downstream use.
+func NewCollector(c *Client, out *Output, opts CollectorOpts) *Collector {
 	if opts.WindowDays <= 0 {
 		opts.WindowDays = defaultWindowDays
 	}
@@ -42,18 +54,23 @@ func NewCollector(c *Client, opts CollectorOpts) *Collector {
 	}
 	return &Collector{
 		client:      c,
+		out:         out,
 		windowDays:  opts.WindowDays,
 		enrichDelay: opts.EnrichDelay,
 		log:         logging.For("gws"),
 	}
 }
 
-// CollectAll runs the full pipeline and returns records keyed by primary email.
-func (c *Collector) CollectAll(ctx context.Context) (map[string]*UserRecord, error) {
+// Name returns the short collector identifier used in logs.
+func (c *Collector) Name() string { return "gws" }
+
+// CollectAll runs the full pipeline and writes records keyed by primary email
+// into c.out.Records.
+func (c *Collector) CollectAll(ctx context.Context) error {
 	start := time.Now()
 	rawUsers, err := c.client.ListUsers(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	c.log.Info("discovered users", "count", len(rawUsers))
 
@@ -70,14 +87,16 @@ func (c *Collector) CollectAll(ctx context.Context) (map[string]*UserRecord, err
 	}
 
 	if err := c.enrichAll(ctx, records); err != nil {
-		return nil, err
+		return err
 	}
 	c.attachDevices(ctx, records)
 
 	c.log.Info("complete",
 		"users", len(records),
 		"elapsed", logging.Elapsed(start))
-	return records, nil
+	c.out.Records = records
+	c.out.Queries = c.client.Queries()
+	return nil
 }
 
 // ── Stage 2 ──────────────────────────────────────────────────────────────────
