@@ -67,12 +67,16 @@ var sophosColumns = []Column[sophos.Endpoint]{
 	}),
 }
 
-// WriteSophos writes the per-endpoint Sophos tab.
-func WriteSophos(ctx context.Context, s *Service, tab string, inv *inventory.AssetInventory) error {
+// WriteSophos writes the per-endpoint Sophos full tab and, when driftTab is set,
+// its (Drift) companion — the same columns, only endpoints the drift engine
+// flagged (drifted holds their endpoint IDs). Skip-empty applies to both.
+func WriteSophos(ctx context.Context, s *Service, tab, driftTab string, inv *inventory.AssetInventory, drifted map[string]struct{}) error {
 	rows := make([]sophos.Endpoint, len(inv.SophosEndpoints))
 	copy(rows, inv.SophosEndpoints)
 	sort.Slice(rows, func(i, j int) bool {
 		return strings.ToLower(rows[i].Hostname) < strings.ToLower(rows[j].Hostname)
 	})
-	return writeTab(ctx, s, tab, sophosColumns, rows, WriteOptions{})
+	return writeFullAndDrift(ctx, s, tab, driftTab, sophosColumns, rows,
+		func(e sophos.Endpoint) string { return e.EndpointID },
+		drifted, WriteOptions{})
 }

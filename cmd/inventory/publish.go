@@ -21,7 +21,7 @@ func inventoryPath(runDate string) []string {
 	if runDate == "" {
 		return []string{"current", "inventory.json"}
 	}
-	return []string{"daily", runDate, "inventory.json"}
+	return []string{"daily", snapshot.RunFolder(runDate), "inventory.json"}
 }
 
 // loadInventoryForPublish reads the inventory the `sheets` command will render,
@@ -68,6 +68,18 @@ func publishSheets(ctx context.Context, log *slog.Logger, s config.Settings, sel
 		log.Warn("could not read findings.json — Findings tab will be skipped", "err", err)
 	}
 
+	// The per-person software shard (for the JumpCloud Software tab) rides the
+	// canonical snapshot. A missing snapshot just leaves the JumpCloud Software
+	// tab empty (skipped).
+	var software []model.JCPersonSoftware
+	if snap, err := store.ReadSnapshot(runDate); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Warn("could not read snapshot — JumpCloud Software tab will be skipped", "err", err)
+		}
+	} else {
+		software = snap.JumpCloud.Software
+	}
+
 	source := "current"
 	if runDate != "" {
 		source = "daily/" + runDate
@@ -85,7 +97,7 @@ func publishSheets(ctx context.Context, log *slog.Logger, s config.Settings, sel
 	// Dry-run: walk every gate and log the verdict, but never open the Sheets
 	// service. The tab closures capture a nil service and are never invoked.
 	if dryRun {
-		writeSheetSet(ctx, log, nil, s, inv, findings, selected, allTargets, true)
+		writeSheetSet(ctx, log, nil, s, inv, findings, software, selected, allTargets, true)
 		return nil
 	}
 
@@ -93,6 +105,6 @@ func publishSheets(ctx context.Context, log *slog.Logger, s config.Settings, sel
 	if err != nil {
 		return err
 	}
-	writeSheetSet(ctx, log, svc, s, inv, findings, selected, allTargets, false)
+	writeSheetSet(ctx, log, svc, s, inv, findings, software, selected, allTargets, false)
 	return nil
 }

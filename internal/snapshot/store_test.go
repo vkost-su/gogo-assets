@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,14 +48,25 @@ func TestWriteSnapshotIdempotent(t *testing.T) {
 		t.Errorf("re-run produced different bytes (not idempotent)")
 	}
 
-	// daily/<run_date>/ holds exactly one snapshot.json, not a pile.
-	dailyDir := filepath.Join(store.root, tierDaily, snap.RunDate)
+	// daily/<run-folder>/ holds exactly one snapshot.tar.gz (the compressed
+	// form), not a pile and not the plain JSON.
+	dailyDir := filepath.Join(store.root, tierDaily, RunFolder(snap.RunDate))
 	entries, err := os.ReadDir(dailyDir)
 	if err != nil {
 		t.Fatalf("read daily dir: %v", err)
 	}
-	if len(entries) != 1 || entries[0].Name() != "snapshot.json" {
-		t.Errorf("daily dir = %v, want exactly [snapshot.json]", entries)
+	if len(entries) != 1 || entries[0].Name() != "snapshot.tar.gz" {
+		t.Errorf("daily dir = %v, want exactly [snapshot.tar.gz]", entries)
+	}
+
+	// The compressed form is byte-stable across identical re-runs.
+	gz1, _ := os.ReadFile(filepath.Join(dailyDir, "snapshot.tar.gz"))
+	if _, err := store.WriteSnapshot(snap); err != nil {
+		t.Fatalf("third write: %v", err)
+	}
+	gz2, _ := os.ReadFile(filepath.Join(dailyDir, "snapshot.tar.gz"))
+	if !bytes.Equal(gz1, gz2) {
+		t.Errorf("snapshot.tar.gz is not byte-stable across identical runs")
 	}
 }
 
@@ -72,11 +84,34 @@ func TestWriteSaaSWritesCurrentAndDaily(t *testing.T) {
 
 	// Both the live copy and the dated daily mirror must exist.
 	current := filepath.Join(store.root, tierCurrent, "saas.json")
-	daily := filepath.Join(store.root, tierDaily, "2026-06-11", "saas.json")
+	daily := filepath.Join(store.root, tierDaily, RunFolder("2026-06-11"), "saas.json")
 	for _, p := range []string{current, daily} {
 		if _, err := os.Stat(p); err != nil {
 			t.Errorf("expected %s: %v", p, err)
 		}
+	}
+}
+
+func TestWriteDailyJSONWritesRunFolderOnly(t *testing.T) {
+	store := NewStore(t.TempDir())
+	export := map[string]any{"schema_version": "2.0", "view": "drift", "count": 1}
+
+	res, err := store.WriteDailyJSON("2026-05-05", "jc-drift.json", export)
+	if err != nil {
+		t.Fatalf("write daily json: %v", err)
+	}
+
+	// The run date is prettified into a readable folder name (may05-2026).
+	daily := filepath.Join(store.root, tierDaily, "may05-2026", "jc-drift.json")
+	if res.Path != daily {
+		t.Errorf("path = %q, want %q", res.Path, daily)
+	}
+	if _, err := os.Stat(daily); err != nil {
+		t.Errorf("expected %s: %v", daily, err)
+	}
+	// …and NOT in current/ (per-service files live only in the run folder).
+	if _, err := os.Stat(filepath.Join(store.root, tierCurrent, "jc-drift.json")); !os.IsNotExist(err) {
+		t.Errorf("jc-drift.json unexpectedly written to current/ (err=%v)", err)
 	}
 }
 
@@ -125,8 +160,8 @@ func TestPrune(t *testing.T) {
 	store := NewStore(t.TempDir())
 	now := time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC)
 
-	mkDaily := func(date string) {
-		if err := os.MkdirAll(filepath.Join(store.root, tierDaily, date), 0o755); err != nil {
+	mkDaily := func(runDate string) {
+		if err := os.MkdirAll(filepath.Join(store.root, tierDaily, RunFolder(runDate)), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -159,8 +194,8 @@ func TestPrune(t *testing.T) {
 		path []string
 		want bool
 	}{
-		{[]string{tierDaily, "2026-06-10"}, true},
-		{[]string{tierDaily, "2026-04-01"}, false},
+		{[]string{tierDaily, RunFolder("2026-06-10")}, true},
+		{[]string{tierDaily, RunFolder("2026-04-01")}, false},
 		{[]string{tierDaily, "not-a-date"}, true},
 		{[]string{tierArchive, "2026-06-01_digest.json"}, true},
 		{[]string{tierArchive, "2025-10-01_digest.json"}, false},

@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+
+	"gogo-assets/internal/allowlist"
 )
 
 // ErrMissing is returned when a required environment variable is unset.
@@ -52,14 +54,50 @@ type Google struct {
 // Sheets holds target spreadsheet identifiers.
 // SpreadsheetID may be empty — sheets writes are then skipped.
 type Sheets struct {
-	SpreadsheetID     string
-	Worksheet         string // GWS tab name
-	JCWorksheet       string
-	SaaSWorksheet     string // JumpCloud SaaS App Management tab
-	SophosWorksheet   string
+	SpreadsheetID string
+
+	Worksheet        string // GWS full tab name
+	GWDriftWorksheet string // GWS drift companion
+
+	JCWorksheet      string // JumpCloud devices full tab
+	JCDriftWorksheet string // JumpCloud devices drift companion
+
+	JCUsersWorksheet      string // JumpCloud directory users full tab
+	JCUsersDriftWorksheet string // JumpCloud directory users drift companion
+
+	SaaSWorksheet string // JumpCloud SaaS App Management (per-app economics) tab
+
+	JCSoftwareWorksheet      string // JumpCloud Software (per-person: device software + SaaS memberships)
+	JCSoftwareDriftWorksheet string // JumpCloud Software drift companion (non-allowlisted software)
+
+	SophosWorksheet      string
+	SophosDriftWorksheet string // Sophos drift companion
+
 	MergedWorksheet   string
 	FindingsWorksheet string // drift-engine findings tab
 	PFWorksheet       string // PeopleForce assets tab
+}
+
+// Filters holds resolved paths to baseline whitelist filter files.
+type Filters struct {
+	JCApps              string
+	JCSystem            string
+	JCLocalUsersMacOS   string
+	JCLocalUsersWindows string
+	JCSaaSOwner         string
+	GWApps              string
+}
+
+// Paths returns an allowlist.Paths bundle for LoadFromPaths.
+func (f Filters) Paths() allowlist.Paths {
+	return allowlist.Paths{
+		JCApps:        f.JCApps,
+		JCSystem:      f.JCSystem,
+		LocalUsersMac: f.JCLocalUsersMacOS,
+		LocalUsersWin: f.JCLocalUsersWindows,
+		JCSaaSOwner:   f.JCSaaSOwner,
+		GWApps:        f.GWApps,
+	}
 }
 
 // Settings is the top-level configuration consumed by main.
@@ -72,7 +110,8 @@ type Settings struct {
 	Sheets           Sheets
 	LocalDir         string // root of the storage tiers (baseline/current/daily/archive)
 	BaselineDir      string // approved baseline anchor; defaults to LocalDir/baseline
-	DigestMaxBytes   int    // hard budget for current/digest.json
+	Filters          Filters
+	DigestMaxBytes   int // hard budget for current/digest.json
 	EnrichDelay      time.Duration
 	RecentlySeenDays int
 	LogLevel         string
@@ -160,6 +199,7 @@ func LoadWithOptions(envPath string, opts LoadOptions) (Settings, error) {
 
 	localDir := expandUser(optional("LOCAL_DIR", "./local"))
 	baselineDir := expandUser(optional("BASELINE_DIR", filepath.Join(localDir, "baseline")))
+	filters := loadFilters(optional, baselineDir)
 
 	google, err := loadGoogle(required, optional, opts.RequireGoogle)
 	if err != nil {
@@ -184,17 +224,25 @@ func LoadWithOptions(envPath string, opts LoadOptions) (Settings, error) {
 		Google:      google,
 		PeopleForce: pf,
 		Sheets: Sheets{
-			SpreadsheetID:     optional("SHEETS_SPREADSHEET_ID", ""),
-			Worksheet:         optional("SHEETS_GW_WORKSHEET", "GoogleWorkspace"),
-			JCWorksheet:       optional("SHEETS_JC_WORKSHEET", "JumpCloud"),
-			SaaSWorksheet:     optional("SHEETS_SAAS_WORKSHEET", "SaaS"),
-			SophosWorksheet:   optional("SHEETS_SP_WORKSHEET", "Sophos"),
-			MergedWorksheet:   optional("SHEETS_MERGED_WORKSHEET", "UsersAll"),
-			FindingsWorksheet: optional("SHEETS_FINDINGS_WORKSHEET", "Findings"),
-			PFWorksheet:       optional("SHEETS_PF_WORKSHEET", "PeopleForce"),
+			SpreadsheetID:            optional("SHEETS_SPREADSHEET_ID", ""),
+			Worksheet:                optional("SHEETS_GW_WORKSHEET", "GoogleWorkspace"),
+			GWDriftWorksheet:         optional("SHEETS_GW_DRIFT_WORKSHEET", "GoogleWorkspace (Drift)"),
+			JCWorksheet:              optional("SHEETS_JC_WORKSHEET", "JumpCloud"),
+			JCDriftWorksheet:         optional("SHEETS_JC_DRIFT_WORKSHEET", "JumpCloud (Drift)"),
+			JCUsersWorksheet:         optional("SHEETS_JC_USERS_WORKSHEET", "JumpCloud Users"),
+			JCUsersDriftWorksheet:    optional("SHEETS_JC_USERS_DRIFT_WORKSHEET", "JumpCloud Users (Drift)"),
+			SaaSWorksheet:            optional("SHEETS_SAAS_WORKSHEET", "SaaS"),
+			JCSoftwareWorksheet:      optional("SHEETS_JC_SOFTWARE_WORKSHEET", "JumpCloud Software"),
+			JCSoftwareDriftWorksheet: optional("SHEETS_JC_SOFTWARE_DRIFT_WORKSHEET", "JumpCloud Software (Drift)"),
+			SophosWorksheet:          optional("SHEETS_SP_WORKSHEET", "Sophos"),
+			SophosDriftWorksheet:     optional("SHEETS_SP_DRIFT_WORKSHEET", "Sophos (Drift)"),
+			MergedWorksheet:          optional("SHEETS_MERGED_WORKSHEET", "UsersAll"),
+			FindingsWorksheet:        optional("SHEETS_FINDINGS_WORKSHEET", "Findings"),
+			PFWorksheet:              optional("SHEETS_PF_WORKSHEET", "PeopleForce"),
 		},
 		LocalDir:         localDir,
 		BaselineDir:      baselineDir,
+		Filters:          filters,
 		DigestMaxBytes:   digestMax,
 		EnrichDelay:      time.Duration(enrichSecs) * time.Second,
 		RecentlySeenDays: days,
@@ -290,6 +338,20 @@ func loadPeopleForce(
 		BaseURL: optional("PF_BASE_URL", ""),
 		MaxRPS:  pfMaxRPS,
 	}, nil
+}
+
+func loadFilters(optional func(string, string) string, baselineDir string) Filters {
+	def := func(env, file string) string {
+		return expandUser(optional(env, filepath.Join(baselineDir, file)))
+	}
+	return Filters{
+		JCApps:              def("FILTER_JC_APPS", allowlist.JCAppsFile),
+		JCSystem:            def("FILTER_JC_SYSTEM", allowlist.JCSystemFile),
+		JCLocalUsersMacOS:   def("FILTER_JC_LOCALUSERS_MACOS", allowlist.LocalUsersMacFile),
+		JCLocalUsersWindows: def("FILTER_JC_LOCALUSERS_WINDOWS", allowlist.LocalUsersWinFile),
+		JCSaaSOwner:         def("FILTER_JC_SAAS_OWNER", allowlist.JCSaaSOwnerFile),
+		GWApps:              def("FILTER_GW_APPS", allowlist.GWAppsFile),
+	}
 }
 
 // EnvLookup performs the same .env discovery as Load — ./.env in the working

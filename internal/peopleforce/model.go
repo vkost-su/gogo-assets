@@ -16,14 +16,14 @@ type Asset struct {
 	Code         string
 	SerialNumber string
 	Description  string
-	LocationID   string
-	CategoryID   string
+	LocationID   string // to remove
+	CategoryID   string // to remove
 	CategoryName string // resolved from AssetCategory.Name
 
 	Assignments []AssetAssignment
 
 	// Resolved from the current (active) assignment + employee directory.
-	AssignedToID  int
+	AssignedToID  int // to remove
 	AssignedEmail string
 	AssignedName  string
 	Department    string
@@ -37,7 +37,7 @@ type Asset struct {
 }
 
 // AssetAssignment is one historical assignment record within an Asset.
-type AssetAssignment struct {
+type AssetAssignment struct { // to remove
 	ID         string
 	UserID     int
 	AssetID    int
@@ -58,6 +58,7 @@ type Employee struct {
 	Department     string
 	Position       string
 	Location       string
+	// add manager (reporating to)
 }
 
 // AssetCategory is a PeopleForce asset category.

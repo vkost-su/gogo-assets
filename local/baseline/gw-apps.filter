@@ -1,0 +1,73 @@
+# gw-apps.filter — Google Workspace connected apps known to be OK.
+#
+# One entry per line, matched against ConnectedApp.DisplayText exactly
+# (case-insensitive, trimmed). A trailing '*' is a prefix rule (e.g. Google*
+# matches every display name starting with "google").
+#
+# Listed apps are purged from UserRecord.ConnectedApps early; ThirdPartyTokens
+# in the canonical snapshot reflects survivors only.
+#
+# Empty file ⇒ nothing filtered.
+
+JumpCloud  
+JumpCloud - Saas Management  
+PeopleForce  
+Deel  
+Slack  
+Zoom  
+Atlassian  
+Atlassian Cloud  
+Miro    
+GitHub  
+GitLab  
+Zendesk  
+Zendesk Connector for Email  
+Google Drive for desktop  
+Figma  
+Canva  
+POEditor  
+Webflow  
+Adobe  
+Adobe Acrobat  
+Cursor  
+Postman  
+Docker  
+ClickHouse  
+Datadog  
+Grafana Labs  
+Sentry  
+Uptrace.dev  
+DigitalOcean Control Panel  
+Cloudflare Dashboard  
+MongoDB, Inc.  
+Cloudsmith  
+Firebase App Distribution  
+Firebase CLI  
+Google Cloud SDK  
+Amazon Web Services  
+PostHog  
+Brex Dashboard  
+Stripe  
+Google Auth for Telnyx  
+OpenAI  
+Claude  
+Claude for Gmail  
+Claude for Google Calendar  
+Claude for Google Drive  
+Perplexity  
+Gemini  
+Gemini for Workspace Studio  
+Gemini Code Assist and Gemini CLI    
+OneSignal  
+Twilio  
+Adapty  
+Testomat.io  
+Upwork Calendar Service  
+Google Chat for Workspace Studio  
+Meet for Workspace Studio  
+Workspace Studio  
+SuperUnlimited Dashboard  
+Super Unlimited Internal Portal  
+2ndLine+  
+2nd Line+ Second Phone Number  
+vkost-admin-sdk-read-only

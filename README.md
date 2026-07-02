@@ -47,8 +47,10 @@ connectors use the same lifecycle instead of growing one-off code paths.
    census.
 5. **Persist** — writes to tiered local storage (current / daily / archive) via
    atomic writes.
-6. **Publish** — writes seven Google Sheets tabs and a compact, findings-first
-   `digest.json` sized to fit a downstream analyst's context budget.
+6. **Publish** — writes the Google Sheets tabs (each service tab paired with a
+   `(Drift)` companion of just the problem rows), plus per-service full/drift JSON
+   into a dated run folder and a compact, findings-first `digest.json` sized to
+   fit a downstream analyst's context budget.
 
 ---
 
@@ -109,14 +111,17 @@ republishes from that file at any time, **without collecting**:
 ./bin/inventory all --tabs usersall          # collect everything, but write only the UsersAll tab
 ```
 
-`--tabs` takes a comma list of `gw, jc, saas, sophos, pf, usersall, findings` (or
-`all`); it filters both the `sheets` command and the auto-write after a normal
-run. A tab with no data is **skipped, never recreated empty**, so a partial run
-or selective publish never clobbers a populated tab.
+`--tabs` takes a comma list of `gw, jc, saas, jcsoft, sophos, pf, usersall,
+findings` (or `all`); it filters both the `sheets` command and the auto-write
+after a normal run. Each service key also writes that tab's `(Drift)` companion.
+A tab with no data is **skipped, never recreated empty**, so a partial run or
+selective publish never clobbers a populated tab.
 
-Every run also mirrors its inventory to `local/daily/<run_date>/inventory.json`.
+Every run also mirrors its inventory into the dated run folder,
+`local/daily/<run-folder>/inventory.json` (readable name, e.g. `may05-2026`).
 `--run-date <YYYY-MM-DD>` republishes from that dated mirror instead of
-`current/` — handy for re-pushing an earlier day's snapshot. `--dry-run` walks
+`current/` — handy for re-pushing an earlier day's snapshot (you pass the
+`YYYY-MM-DD` date; the loader maps it to the folder). `--dry-run` walks
 every gate (target, `--tabs` selection, data availability) and logs the tabs it
 *would* write without opening the Google API — a safe way to verify a
 `--tabs`/`--run-date` combination. Both flags are valid only with the `sheets`
@@ -143,7 +148,7 @@ stage, follow the cross-links into [The pipeline](#the-pipeline) and the
 |---|---|---|
 | **Go 1.25+** | builds the single binary | yes |
 | **Google Workspace SA + DWD** | the only required collector; also authorises the Sheets write | yes |
-| **A target spreadsheet** | where the seven tabs are written | only to publish |
+| **A target spreadsheet** | where the tabs (+ their `(Drift)` companions) are written | only to publish |
 | **JumpCloud API key** | systems, directory users, **SaaS apps** | optional collector |
 | **Sophos Central client id/secret** | endpoints, health, alerts | optional collector |
 | **PeopleForce API key** | hardware assets assigned to employees | optional collector |
@@ -217,7 +222,7 @@ inventory [target|command] [flags]
 |---|---|
 | `inventory all` | **default** — collect every source, correlate, run drift, publish all tabs |
 | `inventory gw` | collect Google Workspace only (+ its tab) |
-| `inventory jc` | collect JumpCloud only, **incl. SaaS** (+ JC & SaaS tabs) |
+| `inventory jc` | collect JumpCloud only, **incl. SaaS** (+ JumpCloud devices, SaaS & JumpCloud Software tabs) |
 | `inventory sp` | collect Sophos only (+ its tab) |
 | `inventory pf` | collect PeopleForce only (+ PeopleForce tab) |
 | `inventory sheets` | re-publish tabs from the **last persisted run** — no collection |
@@ -233,7 +238,7 @@ Targets and flags are **order-independent** (`inventory --json all` ==
 |---|---|---|
 | `--no-sheets` | collection | collect + drift, skip the Sheets write |
 | `--json` | collection | also print the canonical snapshot JSON to stdout |
-| `--tabs <list>` | collection & `sheets` | comma list of `gw,jc,saas,sophos,pf,usersall,findings` (or `all`); write only those |
+| `--tabs <list>` | collection & `sheets` | comma list of `gw,jc,saas,jcsoft,sophos,pf,usersall,findings` (or `all`); write only those (+ their `(Drift)` companions) |
 | `--approve-baseline` | `all` | anchor the current entity set as the census, skip drift |
 | `--approve-from-current` | — | re-approve the census from the **on-disk** snapshot, then exit (no collection) |
 | `--run-date <YYYY-MM-DD>` | `sheets` | publish a dated `daily/` mirror instead of `current/` |
@@ -298,6 +303,14 @@ again in the final summary, as `http requests total=… status_200=…
 status_429=… status_500=…` (one `status_<code>` per code seen, plus `errors` for
 transport failures). A non-trivial `status_429` count means you're still being
 throttled — lower `JC_MAX_RPS`.
+
+Whenever a run gets any 404s, a companion `http 404 endpoints` line lists **which**
+endpoints returned Not Found, grouped by template (id-like path segments collapse
+to `{id}`) with a count each, ordered by frequency — e.g.
+`GET console.jumpcloud.com/api/v2/systeminsights/{id}/{table} ×300`. Many of these
+are expected (a device simply does not report a given System Insights table), but
+the breakdown makes an unexpected 404 (a renamed or unlicensed endpoint) visible
+instead of hiding inside a bare count.
 
 **Throttle / quieten a run.** `ENRICH_DELAY_S` adds a per-user delay to the GWS
 enrichment (use if you hit rate limits); `LOG_LEVEL=DEBUG|INFO|WARN|ERROR`
@@ -450,25 +463,105 @@ entity. Output is deterministic: identical input → byte-identical snapshot.
 
 ### 4. Persist
 
-`store.WriteSnapshot(snap)` writes the canonical (lean) snapshot to both
-`current/snapshot.json` (live working copy) and `daily/<run_date>/snapshot.json`
-(retained history), each via atomic temp-file + rename.
+Each run writes a live working set under `current/` and a **dated, human-readable
+run folder** under `daily/` (e.g. `daily/may05-2026/` — see
+[The run folder](#the-run-folder)). All writes are atomic (temp-file + rename)
+and deterministic (identical input → byte-identical output).
 
-`store.WriteInventory(inv)` then persists the **rich** `inventory.AssetInventory`
-to `current/inventory.json` (+ a daily mirror). This is the **source of truth the
+`store.WriteSnapshot(snap)` writes the canonical (lean) snapshot to
+`current/snapshot.json` (plain live copy — used by `--json`, baseline approval,
+ad-hoc `jq`) and to `daily/<run-folder>/snapshot.tar.gz` (the retained history,
+gzip-tarred).
+
+`store.WriteInventory(inv)` persists the **rich** `inventory.AssetInventory` to
+`current/inventory.json` (+ a daily mirror). This is the **source of truth the
 Sheets tabs render from** — a superset of the lean snapshot that keeps everything
-the canonical model drops (JC hardware/software/policies/SSH/USB, GWS
-connected-apps, and the cross-source device join). The `sheets` command
+the canonical model drops (JC hardware/policies/SSH/USB, GWS connected-apps, and
+the cross-source device join). The `sheets` command
 ([Publishing to Sheets on demand](#publishing-to-sheets-on-demand)) republishes
 the tabs purely from this file, with no collection.
 
 When SaaS apps were collected, `store.WriteSaaS(export)` also writes a
 **standalone** `current/saas.json` (+ a daily mirror) — the full nested
-`jumpcloud.SaaSApp` structures that back the SaaS tab (owner accounts, license
-tiers, contract, SSO connections), wrapped with run provenance
-(`schema_version`, `run_date`, `run_timestamp`, `count`) and ordered exactly as
-the tab. It is skipped on an unlicensed/partial run so an empty file never
-clobbers a populated one.
+`jumpcloud.SaaSApp` structures (owner accounts, license tiers, contract, SSO
+connections), wrapped with run provenance (`schema_version`, `run_date`,
+`run_timestamp`, `count`). It is skipped on an unlicensed/partial run so an empty
+file never clobbers a populated one.
+
+Finally, `writeServiceOutputs` emits the **per-service full/drift files** into the
+run folder — see [The run folder](#the-run-folder) below.
+
+### The run folder
+
+Every run fills a dated folder `daily/<run-folder>/` (readable name, e.g.
+`may05-2026`; the `YYYY-MM-DD` form is still stored inside each file as
+`run_date`, and the prune parser reads the readable name back). One generic
+mechanism (`internal/serviceview`) produces, per service, a **full** JSON (the
+whole service shard) and a **drift** JSON (only records with ≥1 drift — clean
+records are omitted). Each file is self-describing (`schema_version`, `service`,
+`view`, `run_date`, `run_timestamp_utc`, `count`) and byte-stable.
+
+```
+daily/may05-2026/
+  snapshot.tar.gz     # the whole canonical snapshot (jc+sophos+gw+pf), gzip-tarred
+  jc.json             # JumpCloud DEVICES — full
+  jc-drift.json       # JumpCloud DEVICES — only devices the engine flagged
+  jc-saas.json        # JumpCloud SOFTWARE — per-person (device software + SaaS), full
+  jc-saas-drift.json  # JumpCloud SOFTWARE — explicit empty view (software pre-filtered at collect)
+  gw.json             # Google Workspace users — full
+  gw-drift.json       # Google Workspace users — drift only
+  sp.json             # Sophos endpoints — full
+  sp-drift.json       # Sophos endpoints — drift only
+  inventory.json      # rich Sheets source of truth (daily mirror)
+  saas.json           # SaaS economics (daily mirror)
+```
+
+**Skip-empty:** a service that collected nothing writes no files (never an empty
+clobber). A service that ran clean still writes its `*-drift.json` with `count: 0`
+so the external report step always has its input.
+
+**Report step is external.** This program writes only data; it guarantees every
+`*-drift.json` for the run exists, self-describing and byte-stable. Turning those
+drift files into `report-<run-folder>.md` is a separate tool (no AI client, API
+key, or `.md` generation lives here).
+
+### Whitelist filters (early purge)
+
+Every hand-authored whitelist lives in plain-text `*.filter` files under
+`local/baseline/` (tracked). **Listed entries are known-good and are removed
+from all downstream data as early as possible** — right after collection,
+before inventory finalization and canonical assembly. Inventory, snapshot,
+`saas.json`, run-folder JSON, and Sheets all see the same already-filtered
+world.
+
+| Surface | Default file | Match key |
+|---|---|---|
+| JumpCloud device software | `jc-apps.filter` + `jc-system.filter` (merged) | app/extension name |
+| JumpCloud local users (macOS) | `jc-localusers-macos.filter` | local username |
+| JumpCloud local users (Windows) | `jc-localusers-windows.filter` | local username |
+| JumpCloud SaaS owner accounts | `jc-saas-owner.filter` | email domain |
+| Google Workspace connected apps | `gw-apps.filter` | `ConnectedApp.DisplayText` |
+
+**Shared syntax (all `*.filter` files):**
+
+| Pattern | Meaning |
+|---|---|
+| `entry` | exact match (case-insensitive, trimmed) |
+| `entry*` | prefix match — `Google*`, `_*`, `com.apple.*` |
+
+`jc-saas-owner.filter` applies rules to the **domain part** of an email. Exact
+domain entries also match subdomains (`user@mail.corp.com` matches `corp.com`).
+`@corp.com` and `*@corp.com` are equivalent to `corp.com` for exact rules.
+Prefix rules (`super*`) use the same `*` semantics on the domain label.
+
+Linux local users pass through unfiltered until a dedicated file is added.
+
+Override paths with `FILTER_JC_APPS`, `FILTER_JC_SYSTEM`, `FILTER_JC_LOCALUSERS_MACOS`,
+`FILTER_JC_LOCALUSERS_WINDOWS`, `FILTER_JC_SAAS_OWNER`, and `FILTER_GW_APPS`
+(defaults resolve under `BASELINE_DIR`). Empty files ⇒ nothing filtered.
+
+After early purge, the JumpCloud Software full tab is the actionable software
+view — its `(Drift)` companion is skipped when it would duplicate the full tab.
 
 ### 5. Drift engine
 
@@ -491,9 +584,12 @@ current entity set as the baseline for future NEW/GONE detection.
 
 ### 6. Publish (Sheets)
 
-`writeSheets()` writes six tabs (gated by target + data availability). Five are
-built from the **inventory view**; the Findings tab is built from the **drift
-findings**. See the [tab mapping](#sheets-tabs--which-structure-builds-which-table).
+`writeSheets()` writes the tabs (gated by target + data availability). Most are
+built from the **inventory view**; the **JumpCloud Software** tab is built from
+the canonical software shard, and the **Findings** tab from the **drift
+findings**. Every service tab (GoogleWorkspace, JumpCloud, Sophos, JumpCloud
+Software) is paired with a `(Drift)` companion of just the problem rows. See the
+[tab mapping](#sheets-tabs--which-structure-builds-which-table).
 
 ---
 
@@ -565,7 +661,7 @@ backfill guarantees.
 ### The canonical snapshot (engine-facing)
 
 [`internal/model/model.go`](internal/model/model.go) — the flat, sorted, drift-
-tagged schema (`SchemaVersion = "2.0"`). The drift engine operates **purely** on
+tagged schema (`SchemaVersion = "2.1"`). The drift engine operates **purely** on
 this package and never imports a collector.
 
 ```go
@@ -573,7 +669,7 @@ type Snapshot struct {
     SchemaVersion   string
     RunDate         string         // YYYY-MM-DD
     RunTimestamp    time.Time      // exact UTC instant
-    JumpCloud       JumpCloudShard // Devices[] · Identity[] · PolicyEnforcement[] · SaaS[]
+    JumpCloud       JumpCloudShard // Devices[] · Identity[] · PolicyEnforcement[] · SaaS[] · Software[]
     Sophos          SophosShard    // Endpoints[] · AccountHealth
     GoogleWorkspace GWSShard       // Identity[] · Devices[]
 }
@@ -585,6 +681,7 @@ type Snapshot struct {
 | `JCUser` | ✅ | monitored: `MFAEnabled` (crit), `PasswordNeverExpires` (med), `JumpCloudGoEnabled` (low) |
 | `JCPolicyEnforcement` | — | per-policy rollup, dashboard only (not classified) |
 | `SaaSApp` | — | JumpCloud SaaS app + nested accounts / licenses / contract; store-only (not classified) |
+| `JCPersonSoftware` | — | per-person device software/extensions + SaaS memberships (email→device); store-only, whitelist-purged at collect (not classified) |
 | `SophosEndpoint` | ✅ | monitored: `TamperProtection` (crit) |
 | `SophosAccountHealth` | — | tenant-level rollup, derived not collected |
 | `GWSUser` | ✅ | monitored: `MFAEnabled` (crit), `MFAEnforced`/`IsAdmin`/`ASPCount` (high), backup codes / 3p tokens (med) |
@@ -669,18 +766,29 @@ regardless of what Sophos thinks the login is.
 
 ## Sheets tabs — which structure builds which table
 
-`writeSheets()` ([`cmd/inventory/main.go`](cmd/inventory/main.go)) writes six
-tabs. The first column lists the default tab name (overridable via env).
+`writeSheets()` ([`cmd/inventory/sheets.go`](cmd/inventory/sheets.go)) writes the
+tabs below (each service tab also emits a `(Drift)` companion). The first column
+lists the default tab name (overridable via env).
 
 | Tab (default name) | Built from | Row unit | Writer |
 |---|---|---|---|
-| **GoogleWorkspace** | `[]*UnifiedUserRecord` | one user | `WriteGWS` |
-| **JumpCloud** | `JCSystemRow{System, User}` from `JCSystems` + `JCUsers` | one system (+ owner) | `WriteJC` |
-| **SaaS** | `[]jumpcloud.SaaSApp` from `SaaSApps` | one SaaS application | `WriteSaaS` |
-| **Sophos** | `[]sophos.Endpoint` from `SophosEndpoints` | one endpoint | `WriteSophos` |
+| **GoogleWorkspace** (+ **(Drift)**) | `[]*UnifiedUserRecord` | one user | `WriteGWS` |
+| **JumpCloud** (+ **(Drift)**) | `JCSystemRow{System, User}` — **devices only, software columns removed** | one device (+ owner) | `WriteJC` |
+| **SaaS** | `[]jumpcloud.SaaSApp` from `SaaSApps` — per-app licence/cost economics | one SaaS application | `WriteSaaS` |
+| **JumpCloud Software** (+ **(Drift)**) | `[]model.JCPersonSoftware` (canonical shard) — device software/extensions + SaaS memberships, **email→device** | one person | `WriteJCSoftware` |
+| **Sophos** (+ **(Drift)**) | `[]sophos.Endpoint` from `SophosEndpoints` | one endpoint | `WriteSophos` |
 | **PeopleForce** | `[]peopleforce.Asset` from `PFAssets` | one hardware asset | `WritePeopleForce` |
 | **UsersAll** | `[]*UnifiedUserRecord` | one user (cross-source merged) | `WriteMerged` |
 | **Findings** | `[]model.Finding` (drift output) | one finding | `WriteFindings` |
+
+Each `(Drift)` companion has the **same columns** as its full tab and holds only
+the problematic rows — the ones the drift engine flagged (GoogleWorkspace,
+JumpCloud, Sophos). JumpCloud Software is pre-filtered at collect time, so its
+`(Drift)` companion is skipped when empty (the full tab is the actionable view).
+A companion with no drifting rows is skipped, never recreated empty. One generic
+writer (`sheets.writeFullAndDrift`) backs the finding-based companions. The
+`(Drift)` tab names are configurable (`SHEETS_*_DRIFT_WORKSHEET`); companions
+ride their parent's `--tabs` key.
 
 #### SaaS column groups
 
@@ -728,7 +836,11 @@ Every tab uses the same layout engine
 ([`internal/sheets/writer.go`](internal/sheets/writer.go)): a merged group-header
 row, a column-header row, frozen headers, an "Updated" footer, and per-cell
 red/yellow alert colouring driven by each column's `AlertRed` / `AlertYellow`
-predicate. Each tab is fully delete-and-recreated on every write.
+predicate. Each tab is fully delete-and-recreated on every write. Any single cell
+that would exceed Google's 50 000-character limit (e.g. a device with hundreds of
+installed apps in the JumpCloud Software tab) is truncated with a
+`… [truncated — see run-folder JSON]` marker; the full, untruncated data always
+remains in the run folder's `*.json`.
 
 ### UsersAll column groups
 
@@ -785,13 +897,19 @@ that pattern rather than adding their own env parser.
 | `PF_MAX_RPS` | `5.0` | PeopleForce request-rate cap (req/s) |
 | `SHEETS_SPREADSHEET_ID` | — | target spreadsheet (skipped if unset) |
 | `SHEETS_GW_WORKSHEET` | `GoogleWorkspace` | per-source tab names |
-| `SHEETS_JC_WORKSHEET` | `JumpCloud` | |
-| `SHEETS_SAAS_WORKSHEET` | `SaaS` | JumpCloud SaaS apps tab |
+| `SHEETS_GW_DRIFT_WORKSHEET` | `GoogleWorkspace (Drift)` | GWS drift companion |
+| `SHEETS_JC_WORKSHEET` | `JumpCloud` | JumpCloud devices tab |
+| `SHEETS_JC_DRIFT_WORKSHEET` | `JumpCloud (Drift)` | JumpCloud devices drift companion |
+| `SHEETS_SAAS_WORKSHEET` | `SaaS` | JumpCloud SaaS apps (per-app economics) tab |
+| `SHEETS_JC_SOFTWARE_WORKSHEET` | `JumpCloud Software` | per-person device software + SaaS |
+| `SHEETS_JC_SOFTWARE_DRIFT_WORKSHEET` | `JumpCloud Software (Drift)` | skipped when empty (software pre-filtered at collect) |
 | `SHEETS_SP_WORKSHEET` | `Sophos` | |
+| `SHEETS_SP_DRIFT_WORKSHEET` | `Sophos (Drift)` | Sophos drift companion |
 | `SHEETS_PF_WORKSHEET` | `PeopleForce` | PeopleForce assets tab |
 | `SHEETS_MERGED_WORKSHEET` | `UsersAll` | cross-source summary tab |
 | `SHEETS_FINDINGS_WORKSHEET` | `Findings` | drift-findings tab |
 | `LOCAL_DIR`, `BASELINE_DIR` | `./local`, `./local/baseline` | storage roots |
+| `FILTER_JC_APPS`, `FILTER_JC_SYSTEM`, `FILTER_JC_LOCALUSERS_MACOS`, `FILTER_JC_LOCALUSERS_WINDOWS`, `FILTER_JC_SAAS_OWNER`, `FILTER_GW_APPS` | under `BASELINE_DIR` | whitelist filter file paths |
 | `LOCAL_PERSIST` | auto | force storage mode (`true`/`false`); auto ⇒ ephemeral on a GitHub-hosted runner, persist otherwise |
 | `DIGEST_MAX_BYTES` | — | digest size budget (truncates by severity) |
 | `LOG_LEVEL` | `INFO` | structured-log level |
@@ -841,10 +959,14 @@ freely, no recompile. A class matches entities by canonical JSON field name
 
 | Tier | Path | Contents | Retention |
 |---|---|---|---|
-| baseline | `local/baseline/` | `classes.json`, `baseline.meta.json` | permanent (hand-authored, tracked) |
+| baseline | `local/baseline/` | `classes.json`, `baseline.meta.json`, six `*.filter` whitelist files | permanent (hand-authored, tracked) |
 | current | `local/current/` | `snapshot.json`, `inventory.json`, `saas.json`, `classification.json`, `digest.json`, `findings.json` | overwritten each run |
-| daily | `local/daily/YYYY-MM-DD/` | `snapshot.json`, `inventory.json`, `saas.json` | 30 days |
+| daily | `local/daily/<run-folder>/` | `snapshot.tar.gz`, per-service full/drift (`jc*.json`, `gw*.json`, `sp*.json`, `jc-saas*.json`), `inventory.json`, `saas.json` | 30 days |
 | archive | `local/archive/` | `<run_date>_digest.json` | 180 days |
+
+The daily folder name is a readable date (e.g. `may05-2026`); `snapshot.RunFolder`
+formats it and the prune parser reads it back. See
+[The run folder](#the-run-folder).
 
 `--prune` (default on) deletes expired daily/archive entries after each run. All
 writes are atomic (temp-file + rename).
@@ -916,22 +1038,26 @@ internal/
   gworkspace/         Google Workspace collector  (+ to_model converter)
   jumpcloud/          JumpCloud collector          (+ to_model converter)
                       + SaaS App Management (saas_client/collector/mapper/category/to_model)
+                      + ToPersonSoftware (per-person software footprint, email→device)
   sophos/             Sophos Central collector     (+ to_model converter)
   peopleforce/        PeopleForce collector        (+ to_model converter)
                       (model.go, client.go, collector.go, mapper.go, to_model.go)
   inventory/          cross-source unification (email-keyed people + device join)
   assemble/           raw collector output → model.Snapshot (the one seam)
+  allowlist/          file-driven whitelist (*.filter) loader
+  filter/             early post-collect whitelist purge (single seam)
+  serviceview/        generic per-service full/drift views (Split/Wrap/SoftwareDrift)
   baseline/           load classes.json + baseline.meta.json
   drifttag/           reflection-based drift-tag parser (enforces the pointer rule)
   classify/           phase 1: assign entities to baseline classes
   drift/              phase 2: field comparison + census diff
   digest/             build the findings-first digest
-  snapshot/           tiered atomic storage
-  sheets/             Google Sheets writer (one file per tab + shared layout engine)
+  snapshot/           tiered atomic storage (tar.gz run folder + per-service JSON)
+  sheets/             Google Sheets writer (one file per tab + shared layout engine + drift companions)
 local/
-  baseline/           classes.json, baseline.meta.json (hand-authored policy, tracked)
+  baseline/           classes.json, baseline.meta.json, *.filter whitelist files (hand-authored, tracked)
   current/            live snapshot, classification, digest (runtime, gitignored)
-  daily/              dated snapshot history (runtime, gitignored)
+  daily/              dated run folders <mmmDD-YYYY>/ (runtime, gitignored)
 ```
 
 **Key invariant:** `internal/model` never imports a collector package, and the

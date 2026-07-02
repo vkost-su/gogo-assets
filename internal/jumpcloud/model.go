@@ -7,7 +7,7 @@ import "time"
 // PolicyStatus is one applied policy with its last-reported status.
 type PolicyStatus struct {
 	Name   string `json:"name"`
-	Status string `json:"status"` // "success" | "failed" | "pending" | "error"
+	Status string `json:"status"` // "success" | "failed" | "pending" | "error" (expected - success)
 }
 
 // App is an installed application or browser extension, normalised across all OSes.
@@ -18,7 +18,7 @@ type App struct {
 }
 
 // SSHKey is an SSH public key registered on a JumpCloud user.
-type SSHKey struct {
+type SSHKey struct { // flag all
 	Name            string    `json:"name"`
 	PublicKeyPrefix string    `json:"public_key_prefix,omitempty"` // first 40 chars
 	CreatedAt       time.Time `json:"created_at,omitempty"`
@@ -32,22 +32,22 @@ type User struct {
 	FullName string `json:"full_name"`
 
 	// MFA.
-	MFAConfigured bool `json:"mfa_configured"`
-	TOTPEnabled   bool `json:"totp_enabled"`
-	MFARequired   bool `json:"mfa_required"` // enable_user_portal_multifactor
+	MFAConfigured bool `json:"mfa_configured"` // expected - true
+	TOTPEnabled   bool `json:"totp_enabled"`   // expected - true
+	MFARequired   bool `json:"mfa_required"`   // enable_user_portal_multifactor
 
 	// Password.
-	PasswordExpirationDate time.Time `json:"password_expiration_date,omitempty"`
-	PasswordExpired        bool      `json:"password_expired"`
-	PasswordNeverExpires   bool      `json:"password_never_expires"`
+	PasswordExpirationDate time.Time `json:"password_expiration_date,omitempty"` // expected - < 180d
+	PasswordExpired        bool      `json:"password_expired"`                   // expected - flase
+	PasswordNeverExpires   bool      `json:"password_never_expires"`             // expected - false
 
 	// Account state.
-	AccountLocked bool `json:"account_locked"`
+	AccountLocked bool `json:"account_locked"` // expected - false
 	Activated     bool `json:"activated"`
 	Suspended     bool `json:"suspended"`
 
 	// JumpCloud Go feature state at the org level. Nil = unknown.
-	JCGoEligible *bool `json:"jc_go_eligible,omitempty"`
+	JCGoEligible *bool `json:"jc_go_eligible,omitempty"` // expected - true
 
 	SSHKeys []SSHKey `json:"ssh_keys,omitempty"`
 }
@@ -86,16 +86,16 @@ type System struct {
 	MACAddresses []string `json:"mac_addresses,omitempty"`
 
 	// MDM.
-	MDMEnrolled       bool   `json:"mdm_enrolled"`
+	MDMEnrolled       bool   `json:"mdm_enrolled"` // expected - true
 	MDMVendor         string `json:"mdm_vendor,omitempty"`
-	MDMDEP            bool   `json:"mdm_dep"`
+	MDMDEP            bool   `json:"mdm_dep"` // expected - true
 	MDMUserApproved   bool   `json:"mdm_user_approved"`
 	MDMEnrollmentType string `json:"mdm_enrollment_type,omitempty"`
 
 	// Encryption.
-	DiskEncrypted   *bool  `json:"disk_encrypted,omitempty"`   // nil = unknown
-	EncryptionType  string `json:"encryption_type,omitempty"`  // "AES-XTS" / "BitLocker" / "LUKS"
-	FileVaultStatus string `json:"filevault_status,omitempty"` // "On" / "Off"
+	DiskEncrypted   *bool  `json:"disk_encrypted,omitempty"`   // nil = unknown // expected - true
+	EncryptionType  string `json:"encryption_type,omitempty"`  // "AES-XTS" / "BitLocker" / "LUKS" check the algorithm, and decied, flag unsecure
+	FileVaultStatus string `json:"filevault_status,omitempty"` // "On" / "Off" // expected - On (to remove probably)
 
 	// Policies.
 	PolicyStats     map[string]int `json:"policy_stats,omitempty"`
@@ -104,19 +104,22 @@ type System struct {
 	PolicyStatuses  []PolicyStatus `json:"policy_statuses,omitempty"`
 	AppliedPolicies []string       `json:"applied_policies,omitempty"`
 
-	// Local OS users.
-	LocalUsers           []string `json:"local_users,omitempty"`
-	UnexpectedLocalUsers []string `json:"unexpected_local_users,omitempty"`
+	// Local OS users (survivors after early whitelist purge).
+	LocalUsers []string `json:"local_users,omitempty"`
 
 	USBDevices []string `json:"usb_devices,omitempty"`
 
 	// Software (OS-specific, from System Insights).
+	// this struct should be collected and stored separetly
+	// Once predifine a system tools, and filter them
+	// Add a whire list and filter it
 	Apps        []App `json:"apps,omitempty"`         // macOS
 	Programs    []App `json:"programs,omitempty"`     // Windows
 	DEBPackages []App `json:"deb_packages,omitempty"` // Linux deb
 	RPMPackages []App `json:"rpm_packages,omitempty"` // Linux rpm
 
 	// Browser extensions.
+	// this struct should be collected and stored separetly (add to apps)
 	BrowserPlugins   []App `json:"browser_plugins,omitempty"`
 	ChromeExtensions []App `json:"chrome_extensions,omitempty"`
 	FirefoxAddons    []App `json:"firefox_addons,omitempty"`
@@ -124,4 +127,10 @@ type System struct {
 
 	// Network config.
 	EtcHosts []string `json:"etc_hosts,omitempty"`
+}
+
+// SoftwareCount returns the inventory size logged as "software" during JC
+// enrichment (apps, programs, and linux packages — not browser extensions).
+func SoftwareCount(s System) int {
+	return len(s.Apps) + len(s.Programs) + len(s.DEBPackages) + len(s.RPMPackages)
 }

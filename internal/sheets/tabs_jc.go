@@ -14,10 +14,62 @@ import (
 type JCSystemRow struct {
 	System jumpcloud.System
 	User   *jumpcloud.User
+
+	// LocalUsers is the device's local OS accounts with the OS-appropriate
+	// allowlisted system accounts removed — i.e. the unexpected ones.
+	LocalUsers []string
 }
 
 func jcSystem(r JCSystemRow) jumpcloud.System { return r.System }
 func jcUser(r JCSystemRow) *jumpcloud.User    { return r.User }
+
+// fmtJCHostname shows the endpoint hostname; when JumpCloud's display name
+// differs it is appended in parentheses so we do not need a duplicate column.
+func fmtJCHostname(s jumpcloud.System) string {
+	h := strings.TrimSpace(s.Hostname)
+	d := strings.TrimSpace(s.DisplayName)
+	if d == "" || strings.EqualFold(d, h) {
+		return h
+	}
+	return h + " (" + d + ")"
+}
+
+// JCDeviceDrift merges device-level drift IDs with devices whose owner directory
+// user was flagged — so user posture (e.g. password never expires) surfaces on
+// the main JumpCloud devices (Drift) companion, not only on JumpCloud Users.
+func JCDeviceDrift(inv *inventory.AssetInventory, deviceDrift, userDrift map[string]struct{}) map[string]struct{} {
+	if len(userDrift) == 0 {
+		return deviceDrift
+	}
+	out := make(map[string]struct{}, len(deviceDrift)+8)
+	for id := range deviceDrift {
+		out[id] = struct{}{}
+	}
+	for _, sys := range inv.JCSystems {
+		if sys.OwnerEmail == "" {
+			continue
+		}
+		if _, ok := userDrift[sys.OwnerEmail]; ok {
+			out[sys.SystemID] = struct{}{}
+		}
+	}
+	return out
+}
+
+func fmtPasswordStatus(u *jumpcloud.User) string {
+	if u == nil {
+		return ""
+	}
+	switch {
+	case u.PasswordExpired:
+		return "Expired"
+	case u.PasswordNeverExpires:
+		return "Never expires"
+	case !u.PasswordExpirationDate.IsZero():
+		return u.PasswordExpirationDate.Format("2006-01-02")
+	}
+	return ""
+}
 
 func fmtSpecs(r JCSystemRow) string {
 	s := r.System
@@ -40,29 +92,6 @@ func fmtSpecs(r JCSystemRow) string {
 		parts = append(parts, fmt.Sprintf("%d GB SSD", *s.DiskSizeBytes/(1024*1024*1024)))
 	}
 	return strings.Join(parts, " · ")
-}
-
-func fmtApps(apps []jumpcloud.App) string {
-	parts := make([]string, 0, len(apps))
-	for _, a := range apps {
-		label := a.Name
-		if a.Version != "" {
-			label += " (" + a.Version + ")"
-		}
-		if a.LastOpened != "" {
-			label += " [" + a.LastOpened + "]"
-		}
-		parts = append(parts, label)
-	}
-	return strings.Join(parts, "; ")
-}
-
-func fmtPolicyStatuses(r JCSystemRow) string {
-	parts := make([]string, 0, len(r.System.PolicyStatuses))
-	for _, p := range r.System.PolicyStatuses {
-		parts = append(parts, p.Name+": "+p.Status)
-	}
-	return strings.Join(parts, "; ")
 }
 
 func fmtFailedPolicies(r JCSystemRow) string { return strings.Join(r.System.FailedPolicies, "; ") }
@@ -125,21 +154,6 @@ func fmtMDM(r JCSystemRow) string {
 	return strings.Join(parts, " · ")
 }
 
-func jcSoftware(r JCSystemRow) string {
-	s := r.System
-	switch {
-	case len(s.Apps) > 0:
-		return fmtApps(s.Apps)
-	case len(s.Programs) > 0:
-		return fmtApps(s.Programs)
-	case len(s.DEBPackages) > 0:
-		return fmtApps(s.DEBPackages)
-	case len(s.RPMPackages) > 0:
-		return fmtApps(s.RPMPackages)
-	}
-	return ""
-}
-
 var jcColumns = []Column[JCSystemRow]{
 	// ── User Identity ─────────────────────────────────────────────────────────
 	col("User", "Owner Email", func(r JCSystemRow) string { return jcSystem(r).OwnerEmail }),
@@ -177,24 +191,10 @@ var jcColumns = []Column[JCSystemRow]{
 		AlertRed: func(v string) bool { return v == "No" },
 	},
 	{
-		Group:  "User",
-		Header: "Password",
-		Extract: func(r JCSystemRow) string {
-			u := jcUser(r)
-			if u == nil {
-				return ""
-			}
-			switch {
-			case u.PasswordExpired:
-				return "Expired"
-			case u.PasswordNeverExpires:
-				return "Never expires"
-			case !u.PasswordExpirationDate.IsZero():
-				return u.PasswordExpirationDate.Format("2006-01-02")
-			}
-			return ""
-		},
-		AlertRed: func(v string) bool { return v == "Expired" },
+		Group:    "User",
+		Header:   "Password",
+		Extract:  func(r JCSystemRow) string { return fmtPasswordStatus(jcUser(r)) },
+		AlertRed: func(v string) bool { return v == "Expired" || v == "Never expires" },
 	},
 	{
 		Group:  "User",
@@ -211,16 +211,9 @@ var jcColumns = []Column[JCSystemRow]{
 	col("User", "SSH Keys", fmtSSHKeys),
 
 	// ── Endpoint ──────────────────────────────────────────────────────────────
-	col("Endpoint", "Hostname", func(r JCSystemRow) string { return jcSystem(r).Hostname }),
-	col("Endpoint", "Display Name", func(r JCSystemRow) string { return jcSystem(r).DisplayName }),
+	col("Endpoint", "Hostname", func(r JCSystemRow) string { return fmtJCHostname(jcSystem(r)) }),
 	col("Endpoint", "OS", func(r JCSystemRow) string { return jcSystem(r).OSType }),
 	col("Endpoint", "OS Version", func(r JCSystemRow) string { return jcSystem(r).OSVersion }),
-	{
-		Group:       "Endpoint",
-		Header:      "Active",
-		Extract:     func(r JCSystemRow) string { return BoolValue(jcSystem(r).Active) },
-		AlertYellow: func(v string) bool { return v == "No" },
-	},
 	col("Endpoint", "Last Contact", func(r JCSystemRow) string {
 		return fmtDtRelative(jcSystem(r).LastContact)
 	}),
@@ -269,18 +262,14 @@ var jcColumns = []Column[JCSystemRow]{
 		Extract:  fmtFailedPolicies,
 		AlertRed: func(v string) bool { return v != "" },
 	},
-	col("Policies", "All Policies", fmtPolicyStatuses),
 
 	// ── Local Users ───────────────────────────────────────────────────────────
-	col("Local Users", "All Users", func(r JCSystemRow) string {
-		return strings.Join(jcSystem(r).LocalUsers, "; ")
-	}),
+	// "All Users" lists local OS users surviving the early whitelist purge;
+	// any survivor is unexpected → red.
 	{
-		Group:  "Local Users",
-		Header: "Unexpected Users",
-		Extract: func(r JCSystemRow) string {
-			return strings.Join(jcSystem(r).UnexpectedLocalUsers, "; ")
-		},
+		Group:    "Local Users",
+		Header:   "All Users",
+		Extract:  func(r JCSystemRow) string { return strings.Join(r.LocalUsers, "; ") },
 		AlertRed: func(v string) bool { return v != "" },
 	},
 
@@ -289,20 +278,8 @@ var jcColumns = []Column[JCSystemRow]{
 		return strings.Join(jcSystem(r).USBDevices, "; ")
 	}),
 
-	// ── Software ──────────────────────────────────────────────────────────────
-	col("Software", "Applications", jcSoftware),
-	col("Software", "Browser Plugins", func(r JCSystemRow) string {
-		return fmtApps(jcSystem(r).BrowserPlugins)
-	}),
-	col("Software", "Chrome Extensions", func(r JCSystemRow) string {
-		return fmtApps(jcSystem(r).ChromeExtensions)
-	}),
-	col("Software", "Firefox Add-ons", func(r JCSystemRow) string {
-		return fmtApps(jcSystem(r).FirefoxAddons)
-	}),
-	col("Software", "Safari Extensions", func(r JCSystemRow) string {
-		return fmtApps(jcSystem(r).SafariExtensions)
-	}),
+	// Software/extensions moved to the "JumpCloud Software" tab (per-person,
+	// email→device, allowlist-filtered in its drift companion).
 
 	// ── Network Config ────────────────────────────────────────────────────────
 	col("Network Config", "ETC Hosts", func(r JCSystemRow) string {
@@ -310,8 +287,10 @@ var jcColumns = []Column[JCSystemRow]{
 	}),
 }
 
-// WriteJC writes the per-system JumpCloud tab.
-func WriteJC(ctx context.Context, s *Service, tab string, inv *inventory.AssetInventory) error {
+// WriteJC writes the per-device JumpCloud full tab and, when driftTab is set, its
+// (Drift) companion — device findings plus devices whose owner user drifted.
+func WriteJC(ctx context.Context, s *Service, tab, driftTab string, inv *inventory.AssetInventory, deviceDrift, userDrift map[string]struct{}) error {
+	drifted := JCDeviceDrift(inv, deviceDrift, userDrift)
 	rows := make([]JCSystemRow, 0, len(inv.JCSystems))
 	for i := range inv.JCSystems {
 		sys := inv.JCSystems[i]
@@ -321,10 +300,16 @@ func WriteJC(ctx context.Context, s *Service, tab string, inv *inventory.AssetIn
 				u = &user
 			}
 		}
-		rows = append(rows, JCSystemRow{System: sys, User: u})
+		rows = append(rows, JCSystemRow{
+			System:     sys,
+			User:       u,
+			LocalUsers: sys.LocalUsers,
+		})
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		return strings.ToLower(rows[i].System.Hostname) < strings.ToLower(rows[j].System.Hostname)
 	})
-	return writeTab(ctx, s, tab, jcColumns, rows, WriteOptions{})
+	return writeFullAndDrift(ctx, s, tab, driftTab, jcColumns, rows,
+		func(r JCSystemRow) string { return r.System.SystemID },
+		drifted, WriteOptions{})
 }

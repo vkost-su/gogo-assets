@@ -2,31 +2,10 @@ package jumpcloud
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
 )
-
-// _systemUserRE matches usernames that begin with underscore — macOS/Linux
-// system service accounts that we treat as expected.
-var _systemUserRE = regexp.MustCompile(`^_`)
-
-// _knownExpectedUsers is the set of explicit usernames that are NOT flagged
-// as unexpected when found on a managed endpoint.
-var _knownExpectedUsers = map[string]struct{}{
-	"root": {}, "nobody": {}, "daemon": {}, "admin": {}, "Guest": {},
-	"adm-user": {}, "default": {},
-	"_sophos": {}, // explicit catch (also matched by the regex)
-}
-
-func isExpectedUser(u string) bool {
-	if _systemUserRE.MatchString(u) {
-		return true
-	}
-	_, ok := _knownExpectedUsers[u]
-	return ok
-}
 
 // ── Encryption ───────────────────────────────────────────────────────────────
 
@@ -426,12 +405,6 @@ func MapSystem(in MapSystemInput) System {
 			userNames = append(userNames, u)
 		}
 	}
-	unexpected := make([]string, 0)
-	for _, u := range userNames {
-		if !isExpectedUser(u) {
-			unexpected = append(unexpected, u)
-		}
-	}
 
 	appliedNames := make([]string, 0, len(mapped))
 	for _, p := range mapped {
@@ -483,8 +456,7 @@ func MapSystem(in MapSystemInput) System {
 		PolicyStatuses:  mapped,
 		AppliedPolicies: appliedNames,
 
-		LocalUsers:           userNames,
-		UnexpectedLocalUsers: unexpected,
+		LocalUsers: userNames,
 
 		USBDevices: mapUSBDevices(in.USBDevicesRaw),
 

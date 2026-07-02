@@ -131,6 +131,7 @@ func buildJumpCloud(src Sources, meta model.Meta) model.JumpCloudShard {
 		Identity:          identity,
 		PolicyEnforcement: jumpcloud.ToPolicyEnforcement(src.JCSystems, meta),
 		SaaS:              saas,
+		Software:          jumpcloud.ToPersonSoftware(src.JCSystems, src.JCSaaS, meta),
 	}
 }
 

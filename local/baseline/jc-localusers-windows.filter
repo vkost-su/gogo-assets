@@ -1,0 +1,19 @@
+# jc-localusers-windows.filter — known Windows local/system accounts.
+#
+# Filters local OS users on Windows devices (os_family=windows): a listed
+# account is known-good and is purged; survivors persist as unexpected local
+# users (the JumpCloud "All Users" column turns red when any survive).
+#
+# One entry per line, case-insensitive, trimmed. '#' starts a comment; blank
+# lines are ignored. A trailing '*' is a prefix rule.
+#
+# Empty file ⇒ nothing filtered ⇒ every local user shows.
+
+Administrator
+DefaultAccount
+Guest
+WDAGUtilityAccount
+SYSTEM
+NETWORK SERVICE
+LOCAL SERVICE
+rescue            # JumpCloud-managed break-glass account

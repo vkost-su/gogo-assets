@@ -129,7 +129,6 @@ func Collect(ctx context.Context, registry Registry, rt Runtime, target string) 
 		results = append(results, result)
 	}
 
-	inv.Finalize()
 	return inv, src, results, nil
 }
 

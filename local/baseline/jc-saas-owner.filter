@@ -1,0 +1,16 @@
+# jc-saas-owner.filter — SaaS owner-account email domains to purge.
+#
+# One domain per line. Shared syntax:
+#   corp.com / @corp.com / *@corp.com   exact domain (+ subdomains)
+#   corp*                               prefix on domain label
+# '#' comments; blank lines ignored; lone "*" rejected.
+# whose Email (or DeviceOwner when it looks like an email) match a listed
+# domain are removed from SaaSApp.Accounts before assemble.
+#
+# Empty file ⇒ no accounts filtered by domain.
+
+superunlimited.com
+freevpn.co
+esimsuper.com
+vpnsuper.com
+mobilejump.info

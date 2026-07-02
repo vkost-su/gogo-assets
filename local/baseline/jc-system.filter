@@ -1,0 +1,70 @@
+# jc-system.filter — macOS/Windows/Linux system services & built-in tools.
+#
+# Same format and semantics as jc-apps.filter: one name per line,
+# case-insensitive, '#' comments, blank lines ignored, prefix* rules supported.
+# Both files merge at load time into one software filter.
+#
+# Listed names are purged early from every persisted/view structure. Empty file
+# ⇒ nothing filtered.
+#
+# Example:
+#   com.apple.Safari
+#   Windows Defender
+#   coreutils
+
+
+
+# --- macOS:
+
+
+
+
+
+
+
+
+
+# --- Windows:
+About This Mac.app
+Activity Monitor.app
+AirPort Utility.app
+Archive Utility.app
+Audio MIDI Setup.app
+Automator Installer.app
+Automator.app
+Boot Camp Assistant.app
+Calculator.app
+Calibration Assistant.app
+Certificate Assistant.app
+Chess.app
+ColorSync Utility.app
+Console.app
+Dictionary.app
+Digital Color Meter.app
+Directory Utility.app
+Disk Utility.app
+DiskImageMounter.app
+Display Calibrator.app
+DVD Player.app
+Feedback Assistant.app
+FileMerge.app
+Font Book.app
+Grapher.app
+Image Capture.app
+Installer.app
+Keychain Access.app
+Migration Assistant.app
+Passwords.app
+Preview.app
+Print Center.app
+QuickTime Player.app
+Screenshot.app
+Script Editor.app
+Screen Sharing.app
+Stickies.app
+System Information.app
+System Settings.app
+Terminal.app
+TextEdit.app
+Time Machine.app
+Wireless Diagnostics.app

@@ -188,8 +188,10 @@ func gwsActivity(r *inventory.UnifiedUserRecord) *gworkspace.LoginActivity {
 	return r.Google.LoginActivity
 }
 
-// WriteGWS writes the per-user Google Workspace tab.
-func WriteGWS(ctx context.Context, s *Service, tab string, inv *inventory.AssetInventory) error {
+// WriteGWS writes the per-user Google Workspace full tab and, when driftTab is
+// set, its (Drift) companion — the same columns, only users the drift engine
+// flagged (drifted holds their emails). Skip-empty applies to both.
+func WriteGWS(ctx context.Context, s *Service, tab, driftTab string, inv *inventory.AssetInventory, drifted map[string]struct{}) error {
 	records := make([]*inventory.UnifiedUserRecord, 0, len(inv.Users))
 	for _, u := range inv.Users {
 		records = append(records, u)
@@ -197,9 +199,9 @@ func WriteGWS(ctx context.Context, s *Service, tab string, inv *inventory.AssetI
 	sort.Slice(records, func(i, j int) bool {
 		return records[i].Email < records[j].Email
 	})
-	return writeTab(ctx, s, tab, gwsColumns, records, WriteOptions{
-		GrayRowHeader: "Suspended",
-	})
+	return writeFullAndDrift(ctx, s, tab, driftTab, gwsColumns, records,
+		func(r *inventory.UnifiedUserRecord) string { return r.Email },
+		drifted, WriteOptions{GrayRowHeader: "Suspended"})
 }
 
 // col is a small constructor for plain (non-alert) columns.

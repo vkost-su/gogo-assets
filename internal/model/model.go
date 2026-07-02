@@ -31,7 +31,11 @@ package model
 import "time"
 
 // SchemaVersion is the canonical snapshot/digest schema version.
-const SchemaVersion = "2.0"
+//
+// 2.1 adds JumpCloudShard.Software — the per-person JumpCloud software footprint
+// (device apps/extensions + SaaS memberships), a store-only shard with no
+// monitored fields.
+const SchemaVersion = "2.2"
 
 // Severity ranks a finding. Stored human-readable in JSON (CRIT/HIGH/MED/LOW).
 type Severity string
@@ -107,13 +111,14 @@ type Provenance struct {
 // JumpCloudShard groups the JumpCloud canonical records.
 //
 // Devices and Identity are classified entities (run through the drift engine).
-// PolicyEnforcement and SaaS are kept for dashboard/drill-down; they are not
-// classified in this version.
+// PolicyEnforcement, SaaS, and Software are kept for dashboard/drill-down; they
+// are not classified in this version.
 type JumpCloudShard struct {
 	Devices           []JCDevice            `json:"devices"`
 	Identity          []JCUser              `json:"identity"`
 	PolicyEnforcement []JCPolicyEnforcement `json:"policy_enforcement"`
 	SaaS              []SaaSApp             `json:"saas,omitempty"`
+	Software          []JCPersonSoftware    `json:"software,omitempty"`
 }
 
 // SophosShard groups the Sophos canonical records.
@@ -166,8 +171,7 @@ type JCDevice struct {
 	RemoteIP     string     `json:"remote_ip,omitempty"    drift:"volatile"`
 	AgentVersion string     `json:"agent_version,omitempty"`
 
-	MACAddresses         []string `json:"mac_addresses,omitempty"`
-	UnexpectedLocalUsers []string `json:"unexpected_local_users,omitempty"`
+	MACAddresses []string `json:"mac_addresses,omitempty"`
 }
 
 // JCUser is a JumpCloud directory user in canonical form.
@@ -297,6 +301,52 @@ type SaaSSSOApp struct {
 	DisplayLabel string `json:"display_label,omitempty"`
 	TemplateName string `json:"template_name,omitempty"`
 	Status       string `json:"status,omitempty"` // CONNECTED|NOT_CONNECTED
+}
+
+// JCPersonSoftware is the per-person software footprint on JumpCloud, anchored by
+// email (the person) and joined through device ownership (the device). It folds
+// the person's SaaS-app memberships and every app/extension found on the devices
+// they own into a single record — the "JumpCloud Software (SaaS)" view.
+//
+// Store-only: it carries no monitored fields and is never classified. What
+// surfaces in the drift view is decided at output time by the allowlist
+// (package allowlist), not by the drift engine, so the FindingKind set stays
+// closed at six. Devices, Apps, Extensions, and SaaS are all sorted
+// deterministically by the assembler.
+type JCPersonSoftware struct {
+	Meta Meta `json:"meta"`
+
+	OwnerEmail string   `json:"owner_email" drift:"identity"`
+	Devices    []string `json:"devices,omitempty"` // hostnames of the person's JumpCloud devices
+
+	SaaS       []JCSaaSMembership `json:"saas,omitempty"`       // SaaS apps this person has an account in
+	Apps       []JCSoftwareItem   `json:"apps,omitempty"`       // native apps (macOS/Windows/Linux)
+	Extensions []JCSoftwareItem   `json:"extensions,omitempty"` // browser extensions
+
+	// Rollups derived from the nested data.
+	SaaSCount      int `json:"saas_count"`
+	AppCount       int `json:"app_count"`
+	ExtensionCount int `json:"extension_count"`
+}
+
+// JCSaaSMembership is one SaaS application a person has an account in, folded into
+// their software footprint. It is a thin reference back to the full SaaSApp
+// record in JumpCloudShard.SaaS, which keeps the license/contract economics.
+type JCSaaSMembership struct {
+	AppID  string `json:"app_id"`
+	Name   string `json:"name"`
+	Status string `json:"status,omitempty"` // NEWLY_DISCOVERED|APPROVED|UNAPPROVED|…
+}
+
+// JCSoftwareItem is one installed application or browser extension found on a
+// person's device. Source records the origin (OS package set or browser);
+// DeviceHostname records which device, so the same app on two machines is two
+// items.
+type JCSoftwareItem struct {
+	Name           string `json:"name"`
+	Version        string `json:"version,omitempty"`
+	Source         string `json:"source"` // macos|windows|deb|rpm|chrome|firefox|safari|plugin
+	DeviceHostname string `json:"device_hostname,omitempty"`
 }
 
 // ── Sophos ───────────────────────────────────────────────────────────────────

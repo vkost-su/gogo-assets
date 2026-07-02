@@ -3,7 +3,10 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"gogo-assets/internal/allowlist"
 )
 
 // TestDefaultEnvPath covers the .env discovery order: a local ./.env wins, else
@@ -212,6 +215,44 @@ func TestLoadWithOptionsRequiresOnlySelectedServices(t *testing.T) {
 			t.Fatalf("optional invalid Google path should not fail JC config: %v", err)
 		}
 	})
+}
+
+// TestLoadFilterPaths confirms FILTER_* env vars resolve under BASELINE_DIR with
+// tilde expansion.
+func TestLoadFilterPaths(t *testing.T) {
+	xdg := t.TempDir()
+	cfgDir := filepath.Join(xdg, "gogo-assets")
+	baseline := filepath.Join(cfgDir, "baseline")
+	if err := os.MkdirAll(baseline, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sa := filepath.Join(cfgDir, "sa.json")
+	if err := os.WriteFile(sa, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("GWS_SA_JSON_PATH", sa)
+	t.Setenv("GWS_ADMIN_EMAIL", "admin@example.com")
+	t.Setenv("FILTER_JC_APPS", "~/custom/jc-apps.filter")
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(home, "custom", "jc-apps.filter")
+
+	s, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if s.Filters.JCApps != want {
+		t.Errorf("Filters.JCApps = %q, want %q", s.Filters.JCApps, want)
+	}
+	if !strings.HasSuffix(s.Filters.JCSystem, allowlist.JCSystemFile) {
+		t.Errorf("Filters.JCSystem = %q, want default under baseline", s.Filters.JCSystem)
+	}
 }
 
 // TestLoadStillRequiresGoogle preserves the orchestrator contract: Load is the

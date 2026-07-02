@@ -43,8 +43,10 @@ import (
 	"syscall"
 	"time"
 
+	"gogo-assets/internal/allowlist"
 	"gogo-assets/internal/assemble"
 	"gogo-assets/internal/config"
+	"gogo-assets/internal/filter"
 	"gogo-assets/internal/httpstat"
 	"gogo-assets/internal/inventory"
 	"gogo-assets/internal/jumpcloud"
@@ -103,7 +105,7 @@ func run(args []string) error {
 	fs.Usage = func() { printUsage(os.Stdout) }
 	emitJSON := fs.Bool("json", false, "print the canonical snapshot JSON to stdout")
 	noSheets := fs.Bool("no-sheets", false, "skip the Google Sheets write")
-	tabsFlag := fs.String("tabs", "", "comma-separated tabs to write (gw,jc,saas,sophos,pf,usersall,findings); default all")
+	tabsFlag := fs.String("tabs", "", "comma-separated tabs to write (gw,jc,saas,jcsoft,sophos,pf,usersall,findings); default all")
 	runDateFlag := fs.String("run-date", "", "(sheets) publish the daily/<YYYY-MM-DD>/inventory.json mirror instead of current")
 	dryRun := fs.Bool("dry-run", false, "(sheets) log which tabs would be written without touching the Google API")
 	approve := fs.Bool("approve-baseline", false, "write the baseline census from this run and skip drift")
@@ -214,7 +216,7 @@ func run(args []string) error {
 		"sophos_endpoints", len(inv.SophosEndpoints),
 		"pf_assets", len(inv.PFAssets))
 
-	log.Info("http requests", httpCounter.Snapshot().LogArgs()...)
+	logHTTP(log, httpCounter)
 
 	if inv.MatchStats != nil {
 		log.Info("match",
@@ -226,6 +228,15 @@ func run(args []string) error {
 			"bare_matched", inv.MatchStats["bare_username_matched"],
 			"bare_unmatched", inv.MatchStats["bare_username_unmatched"])
 	}
+
+	filters, err := allowlist.LoadFromPaths(settings.Filters.Paths())
+	if err != nil {
+		log.Warn("filter load failed — no whitelist purge will run", "err", err)
+		filters = allowlist.Set{}
+	}
+	stats := filter.Apply(inv, &src, filters)
+	filter.Log(log, stats)
+	inv.Finalize()
 
 	// ── Assemble canonical snapshot ──────────────────────────────────────────
 	doneAssemble := logging.Phase(log, "assemble")
@@ -308,6 +319,12 @@ func run(args []string) error {
 		if _, err := store.WriteCurrentJSON("findings.json", findings); err != nil {
 			log.Error("findings write failed", "err", err)
 		}
+
+		// Per-service full/drift files into the dated run folder — one generic
+		// mechanism (serviceview) shared across jc/gw/sp, plus jc-saas.
+		doneOutputs := logging.Phase(log, "service-outputs")
+		writeServiceOutputs(log, store, snap, findings)
+		doneOutputs("run_folder", snapshot.RunFolder(runDate))
 	}
 
 	// ── Sheets ───────────────────────────────────────────────────────────────
@@ -318,7 +335,7 @@ func run(args []string) error {
 		log.Info("SHEETS_SPREADSHEET_ID not set — skipping Sheets write")
 	default:
 		doneSheets := logging.Phase(log, "sheets")
-		if err := writeSheets(ctx, log, settings, inv, findings, target, tabsSel); err != nil {
+		if err := writeSheets(ctx, log, settings, inv, findings, snap.JumpCloud.Software, target, tabsSel); err != nil {
 			log.Error("sheets write failed", "err", err)
 		} else {
 			doneSheets()
@@ -351,7 +368,7 @@ func run(args []string) error {
 		"endpoints", len(inv.SophosEndpoints),
 		"findings", len(findings))
 	logProvenance(log, snap.Provenance)
-	log.Info("http requests", httpCounter.Snapshot().LogArgs()...)
+	logHTTP(log, httpCounter)
 	log.Info("elapsed", "time", logging.Elapsed(runStart))
 	return nil
 }
@@ -387,11 +404,13 @@ Flags:
   --approve-from-current  re-approve the census from the on-disk snapshot, then exit
   --prune             prune expired daily/archive tiers after the run (default true)
 
---tabs keys:
-  gw         Google Workspace users
-  jc         JumpCloud systems
-  saas       JumpCloud SaaS App Management
-  sophos     Sophos endpoints
+--tabs keys (each service tab also writes a "<Name> (Drift)" companion of just
+the problematic rows):
+  gw         Google Workspace users (+ drift)
+  jc         JumpCloud devices (+ drift)
+  saas       JumpCloud SaaS App Management (per-app economics)
+  jcsoft     JumpCloud Software — per-person device software + SaaS (pre-filtered at collect)
+  sophos     Sophos endpoints (+ drift)
   pf         PeopleForce assets
   usersall   cross-source per-user summary
   findings   drift-engine findings
@@ -468,6 +487,18 @@ func collect(ctx context.Context, log *slog.Logger, s config.Settings, target st
 		Log:         log,
 	}, target)
 	return inv, src, err
+}
+
+// logHTTP logs the request-volume summary and, when any occurred, the 404
+// breakdown by endpoint — always visible, so a run surfaces which endpoints came
+// back Not Found (e.g. System Insights tables a device does not report), not just
+// how many.
+func logHTTP(log *slog.Logger, c *httpstat.Counter) {
+	s := c.Snapshot()
+	log.Info("http requests", s.LogArgs()...)
+	if args := s.NotFoundArgs(); args != nil {
+		log.Info("http 404 endpoints", args...)
+	}
 }
 
 // logProvenance logs the concrete API query manifest per service, skipping any

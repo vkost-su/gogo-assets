@@ -1,0 +1,157 @@
+# jc-apps.filter — normal apps & browser extensions known to be OK.
+#
+# One entry per line, the name EXACTLY as shown in JumpCloud (macOS Apps,
+# Windows Programs, Linux deb/rpm packages, and browser extensions). Matching is
+# case-insensitive and trims surrounding whitespace. Lines starting with '#' are
+# comments; blank lines are ignored. Shared syntax (all *.filter files):
+#   entry      exact match
+#   entry*     prefix match (e.g. Google*, com.apple.*)
+# A lone "*" is rejected.
+#
+# Listed names are known-good and are purged from all downstream data as early as
+# possible — inventory, snapshot, Sheets, and run-folder JSON all see only
+# survivors. While this file is empty, nothing is filtered.
+#
+# Example:
+#   Google Chrome
+#   Slack
+#   1Password 7 - Password Manager
+
+
+# --- Global:
+Zoom*
+Sophos*
+Slack*
+JumpCloud*
+Pritunl*
+Google*
+1Password*
+Bluetooth*
+Xcode
+
+
+# --- macOS:
+ABAssistantService.app
+AMSEngagementViewService.app
+AOSAlertManager.app
+AOSHeartbeat.app
+AOSPushRelay.app
+AOSUIPrefPaneLauncher.app
+ARDAgent.app
+AXVisualSupportAgent.app
+AccessibilityUIServer.app
+AccessibilityVisualsAgent.app
+AddressBookManager.app
+AddressBookSourceSync.app
+AddressBookSync.app
+AddressBookUrlForwarder.app
+AirPlayUIAgent.app
+AppSSOAgent.app
+AppleMobileDeviceHelper.app
+AppleMobileSync.app
+AquaAppearanceHelper.app
+AskPermissionUI.app
+AutoFillPanelService.app
+AutomationModeUI.app
+BackgroundTaskManagementAgent.app
+CalendarFileHandler.app
+Captive Network Assistant.app
+ClassroomStudentMenuExtra.app
+Conflict Resolver.app
+CoreLocationAgent.app
+CoreServicesUIAgent.app
+DFRHUD.app
+Diagnostics Reporter.app
+DiscHelper.app
+DiskImages UI Agent.app
+EscrowSecurityAlert.app
+FamilyExtensionHost.app
+FeedbackRemoteView.app
+FileProvider-Feedback.app
+FileSystemUIAgent.app
+FindMyMacMessenger.app
+FollowUpUI.app
+FontRegistryUIAgent.app
+GameOverlayUI.app
+GameTrampoline.app
+IDSRemoteURLConnectionAgent.app
+IMAutomaticHistoryDeletionAgent.app
+IMTransferAgent.app
+IOUIAgent.app
+Keychain Circle Notification.app
+KerberosMenuExtra.app
+KeyboardAccessAgent.app
+LinkedNotesUIService.app
+MDMMigrationTrampoline.app
+ManagedClient.app
+MobileDeviceUpdater.app
+MusicRecognitionMac.app
+NetAuthAgent.app
+NotificationCenter.app
+NowPlayingTouchUI.app
+OBEXAgent.app
+ODSAgent.app
+OSDUIHelper.app
+PIPAgent.app
+PasswordManagerBrowserExtensionHelper.app
+PasswordsMenuBarExtra.app
+PeopleMessageService.app
+PeopleViewService.app
+PowerChime.app
+PressAndHold.app
+PreviewShell.app
+ProfileHelper.app
+QuickLookUIHelper.app
+RapportUIAgent.app
+RegisterPluginIMApp.app
+Rosetta 2 Updater.app
+SSMenuAgent.app
+STMUIHelper.app
+ScreenReaderUIServer.app
+SoftwareUpdateNotificationManager.app
+SpacesTouchBarAgent.app
+SpeechDataInstallerd.app
+SpeechRecognitionServer.app
+Spotlight.app
+Summary Service.app
+SyncServer.app
+System Events.app
+SystemIntents.app
+SystemUIServer.app
+TMHelperAgent.app
+TextInputMenuAgent.app
+TextInputSwitcher.app
+ThermalTrap.app
+TipsSpotlightHandler.app
+UASharedPasteboardProgressUI.app
+UIKitSystem.app
+UnmountAssistantAgent.app
+UserNotificationCenter.app
+WallpaperAgent.app
+WiFiAgent.app
+WindowManager.app
+WindowManagerShowDesktopEducation.app
+WorkoutAlert-Mac.app
+aomhost.app
+caphost.app
+ctkbind.app
+eaptlstrust.app
+iCloudUserNotificationsd.app
+identityservicesd.app
+imagent.app
+loginwindow.app
+nbagent.app
+privatecloudcomputed.app
+quicklookd.app
+rcd.app
+screencaptureui.app
+sociallayerd.app
+storeuid.app
+syncuid.app
+universalAccessAuthWarn.app
+
+
+
+
+
+# --- Windows:

@@ -32,6 +32,7 @@ var _labels = map[string]string{
 	"snapshot":  "snapshot",
 	"baseline":  "baseline",
 	"drift":     "drift",
+	"filter":    "filter",
 }
 
 // Configure installs the root slog handler with the given level

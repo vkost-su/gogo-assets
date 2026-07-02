@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/option"
@@ -18,6 +19,29 @@ import (
 var ErrWrite = errors.New("sheets: write failed")
 
 const _scope = "https://www.googleapis.com/auth/spreadsheets"
+
+// maxCellChars caps a single cell's content. Google Sheets rejects any cell over
+// 50000 characters; we truncate below that (leaving room for the marker) so a
+// pathological cell — e.g. a device with hundreds of installed apps — degrades to
+// a truncated preview on the tab instead of failing the whole write. The full,
+// untruncated data always remains in the run folder's JSON.
+const maxCellChars = 49500
+
+const _truncMarker = "… [truncated — see run-folder JSON]"
+
+// clampCell truncates s to stay within the per-cell limit, cutting on a UTF-8
+// rune boundary and appending a marker. len(s) (bytes) ≥ rune count, so a byte
+// cap is a safe proxy for the character limit.
+func clampCell(s string) string {
+	if len(s) <= maxCellChars {
+		return s
+	}
+	cut := maxCellChars - len(_truncMarker)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + _truncMarker
+}
 
 // Service wraps a sheets/v4 client + the configured spreadsheet ID.
 type Service struct {
@@ -85,7 +109,7 @@ func writeTab[T any](
 		row := make([]any, ncols)
 		sRow := make([]string, ncols)
 		for i, c := range columns {
-			val := safeExtract(c.Extract, r)
+			val := clampCell(safeExtract(c.Extract, r))
 			row[i] = val
 			sRow[i] = val
 		}

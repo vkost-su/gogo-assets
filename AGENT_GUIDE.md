@@ -31,6 +31,9 @@ internal/
     service.go     Module interface, Registry, Collect() orchestrator
     modules.go     GoogleWorkspaceModule, JumpCloudModule, SophosModule
   assemble/assemble.go  Sources → model.Snapshot (the ONLY seam collectors↔engine)
+  allowlist/       file-driven whitelist (*.filter); Load/LoadFromPaths + Unresolved[T] + DomainList
+  filter/          early post-collect whitelist purge (filter.Apply)
+  serviceview/     generic per-service full/drift views (DriftedIDs/Split/Filter/Wrap, Export[T], SoftwareDrift)
   inventory/
     model.go       AssetInventory, UnifiedUserRecord, DevicePair (Sheets-facing)
     ingest.go      AddGoogle / AddJC / AddSophos
@@ -51,29 +54,32 @@ internal/
     write.go       WriteBaseline() — census anchoring (--approve-baseline)
   drifttag/        reflection-based drift-tag parser; enforces pointer rule at init
   snapshot/
-    store.go       WriteSnapshot / WriteInventory / WriteSaaS / WriteCurrentJSON
+    store.go       WriteSnapshot(tar.gz) / WriteInventory / WriteSaaS / WriteDailyJSON /
+                   WriteCurrentJSON / ReadSnapshot / RunFolder (readable daily name)
     snapshot.go    tiered store paths (current / daily / archive); atomic writes
   sheets/
-    writer.go      writeTab[T] generic — delete-recreate, values, format
+    writer.go      writeTab[T] generic — delete-recreate, values, format; clampCell (50k/cell cap)
+    drift.go       writeFullAndDrift[T] — full tab + (Drift) companion; driftSubset filter
     column.go      Column[T] struct + Bool/BoolValue helpers
     cellfmt.go     cell colour helpers
     format.go      batch format request builders
-    tabs_gws.go    WriteGWS
-    tabs_jc.go     WriteJC
-    tabs_saas.go   WriteSaaS
-    tabs_sophos.go WriteSophos
+    tabs_gws.go    WriteGWS (+ drift companion)
+    tabs_jc.go     WriteJC (devices only; software columns removed) (+ drift)
+    tabs_saas.go   WriteSaaS (per-app economics)
+    tabs_jcsoftware.go WriteJCSoftware — per-person software + SaaS (+ drift, skipped when empty)
+    tabs_sophos.go WriteSophos (+ drift companion)
     tabs_pf.go     WritePeopleForce
     tabs_merged.go WriteMerged (UsersAll)
     tabs_findings.go WriteFindings
   servicecli/runner.go  shared runner for standalone service binaries
-  httpstat/        shared HTTP counter (RoundTripper); logs status_200/429/500 totals
+  httpstat/        shared HTTP counter (RoundTripper); per-status totals + 404-endpoint breakdown
   logging/         slog handler
   apiquery/        query-template dedup helper used by collectors
 
 local/
-  baseline/        classes.json (policy config), baseline.meta.json (census anchor)
-  current/         runtime files — snapshot.json, inventory.json, saas.json, etc.
-  daily/           YYYY-MM-DD/ dated mirrors
+  baseline/        classes.json, baseline.meta.json, six *.filter whitelist files
+  current/         runtime files — snapshot.json, inventory.json, saas.json, findings.json, etc.
+  daily/           <run-folder>/ (readable date, e.g. may05-2026): snapshot.tar.gz + per-service full/drift
   archive/         dated digest archives
 ```
 
@@ -89,13 +95,16 @@ local/
                   └───────────────┬─────────────────┬────────────────────┘
                                   │                 │
             inv.Finalize()        │                 │ assemble.Build()
+                                  ▲                 ▲
+                       filter.Apply (post-collect)   │
                                   ▼                 ▼
                inventory.AssetInventory      model.Snapshot
                (email-keyed, Sheets view)    (flat, sorted, drift engine view)
                         │                          │
-              writeSheets()                  runDrift()
-              7 Google Sheets tabs           classify → drift → digest
-                                             → findings.json, digest.json
+              writeSheets()                  runDrift() + writeServiceOutputs()
+              service tabs + (Drift)         classify → drift → digest
+              companions + JC Software       → findings.json, digest.json,
+              (from canonical shard)           per-service full/drift JSON (run folder)
 ```
 
 **Key invariants:**
@@ -299,16 +308,18 @@ Rules for `Column[T]`:
 - `AlertRed` / `AlertYellow` receive the already-extracted string.
 - `Wrap: true` for cells with multi-line content.
 
-### Step 2 — Call `WriteFoo` in `cmd/inventory/publish.go`
+### Step 2 — Register the tab in `cmd/inventory/sheets.go`
 
-In `writeSheets()`, add a gate + call:
+`buildSheetTabs` is the single registry both the auto-write and `sheets` publish
+paths go through. Add a `tabKey` const (+ `allTabKeys`, `targetTabs`, and the
+`parseTabs` error message), then a `sheetTab` entry with a data-availability gate:
 ```go
-if tabAllowed("foo", allowed) && len(inv.FooRecords) > 0 {
-    if err := sheets.WriteFoo(ctx, svc, cfg.Sheets.FooWorksheet, inv.FooRecords); err != nil {
-        return fmt.Errorf("write foo tab: %w", err)
-    }
-}
+{tabFoo, s.Sheets.FooWorksheet, len(inv.FooRecords) > 0, func() error {
+    return sheets.WriteFoo(ctx, svc, s.Sheets.FooWorksheet, inv.FooRecords)
+}},
 ```
+For a tab with a `(Drift)` companion, use `sheets.writeFullAndDrift` inside the
+writer (pass the drift key set from `serviceview.DriftedIDs`) — see `WriteGWS`.
 
 ### Step 3 — Add config for tab name
 
@@ -321,9 +332,11 @@ In `LoadWithOptions`:
 FooWorksheet: optional("SHEETS_FOO_WORKSHEET", "Foo"),
 ```
 
-### Step 4 — Add `foo` to `--tabs` key list
+### Step 4 — Add `foo` to the `--tabs` key list
 
-In `cmd/inventory/main.go`, update the `parseTabs` allowed set and the help text.
+In `cmd/inventory/sheets.go`, add the key to `allTabKeys`/`targetTabs` (the
+`parseTabs` validation derives from `allTabKeys`); then update the `--tabs` help
+text in `cmd/inventory/main.go` (`printUsage` + the flag description).
 
 ---
 
@@ -375,7 +388,9 @@ Edit `local/baseline/classes.json` only — no recompile:
 There are exactly 6 kinds (`BASELINE_DRIFT`, `DATA_GAP`, `NEW_ENTITY`,
 `ENTITY_DISAPPEARED`, `UNCLASSIFIED`, `CLASS_CONFLICT`). Do not add a 7th
 without explicit discussion — it breaks the digest schema and the downstream
-contract. SaaS Status findings were deliberately excluded for this reason.
+contract. SaaS Status findings were deliberately excluded for this reason, and
+JumpCloud software is whitelist-purged at the **collection** layer
+(`filter.Apply`); the FindingKind set stays six.
 
 ---
 
@@ -419,6 +434,14 @@ classified and generate no drift findings. The FindingKind set remains closed at
 six. Do not add monitored fields to `PFAsset` without an explicit decision to
 extend FindingKind.
 
+### JumpCloud Software is store-only (early-purge, no drift companion)
+
+`model.JCPersonSoftware` (`JumpCloudShard.Software`) has no `drift:"monitored"`
+fields and is never classified. Known-good software is purged at collection time
+via `filter.Apply`; `serviceview.SoftwareDrift` returns nil so the full tab is
+the actionable view. Do not promote software into a monitored field or a 7th
+FindingKind without an explicit decision.
+
 ---
 
 ## 7. Config Reference (quick)
@@ -437,9 +460,10 @@ extend FindingKind.
 | `PF_BASE_URL` | `https://app.peopleforce.io/api/public/v3` | PeopleForce API base URL |
 | `PF_MAX_RPS` | `5.0` | PeopleForce request-rate cap (req/s) |
 | `SHEETS_SPREADSHEET_ID` | — | Target spreadsheet (skipped if unset) |
-| `SHEETS_*_WORKSHEET` | tab names | Override individual tab names (`SHEETS_PF_WORKSHEET` default `PeopleForce`) |
+| `SHEETS_*_WORKSHEET` | tab names | Override tab names, incl. `SHEETS_JC_SOFTWARE_WORKSHEET` and the `SHEETS_*_DRIFT_WORKSHEET` companions |
 | `LOCAL_DIR` | `./local` | Root of storage tiers |
-| `BASELINE_DIR` | `./local/baseline` | Baseline config + census |
+| `BASELINE_DIR` | `./local/baseline` | Baseline config + census + `*.filter` files |
+| `FILTER_JC_APPS` … `FILTER_GW_APPS` | under `BASELINE_DIR` | whitelist filter file path overrides |
 | `LOCAL_PERSIST` | auto | `true`/`false`; auto=ephemeral on github-hosted runner |
 | `DIGEST_MAX_BYTES` | `51200` | Hard cap on digest.json size |
 | `LOG_LEVEL` | `INFO` | `DEBUG`/`INFO`/`WARN`/`ERROR` |
@@ -454,17 +478,77 @@ OS environment always overrides file values.
 
 | Tier | Path | Written by | Kept |
 |---|---|---|---|
-| `baseline` | `local/baseline/` | `--approve-baseline` | permanent; git-tracked |
+| `baseline` | `local/baseline/` | `--approve-baseline` + hand-authored | permanent; git-tracked |
 | `current` | `local/current/` | every run | overwritten each run |
-| `daily` | `local/daily/YYYY-MM-DD/` | every run | 30 days |
+| `daily` | `local/daily/<run-folder>/` | every run | 30 days |
 | `archive` | `local/archive/` | every run | 180 days |
 
-All writes are atomic (temp-file + rename via `snapshot.Store`).
+`baseline/` holds `classes.json`, `baseline.meta.json`, and six `*.filter`
+whitelist files. The daily folder
+name is a readable date (`snapshot.RunFolder("2026-05-05") == "may05-2026"`); the
+prune parser (`dirDate`, `Jan02-2006`) reads it back. All writes are atomic
+(temp-file + rename via `snapshot.Store`).
 
-`store.WriteSnapshot(snap)` writes `snapshot.json` (lean canonical).
-`store.WriteInventory(inv)` writes `inventory.json` (rich Sheets source of truth).
-`store.WriteSaaS(export)` writes `saas.json` (SaaS tab source; skipped if empty).
-`store.WriteCurrentJSON(name, v)` writes any raw artifact to `current/<name>`.
+`store.WriteSnapshot(snap)` → `current/snapshot.json` (plain) + `daily/<folder>/snapshot.tar.gz`.
+`store.WriteInventory(inv)` → `inventory.json` (rich Sheets source of truth).
+`store.WriteSaaS(export)` → `saas.json` (per-app SaaS economics; skipped if empty).
+`store.WriteDailyJSON(runDate, name, v)` → `daily/<folder>/<name>` (per-service full/drift).
+`store.WriteCurrentJSON(name, v)` → any raw artifact under `current/`.
+`store.ReadSnapshot(runDate)` reads the snapshot back (plain current, or the daily tar.gz).
+
+### Per-service full/drift outputs (`serviceview`)
+
+`cmd/inventory/serviceoutputs.go` (`writeServiceOutputs`) emits, per service, a
+**full** and a **drift** JSON into the run folder via one generic mechanism —
+no per-service copy:
+
+- `serviceview.DriftedIDs(findings, svc, etype)` → identity keys with ≥1 finding.
+- `serviceview.Split(records, keyOf, drifted, …)` → `Export[T]` full + drift.
+- `serviceview.Export[T]` is the self-describing wrapper (`schema_version`,
+  `service`, `view`, `run_date`, `run_timestamp_utc`, `count`).
+
+Emitted: `jc.json`/`jc-drift.json` (devices), `gw.json`/`gw-drift.json`,
+`sp.json`/`sp-drift.json`, and `jc-saas.json`/`jc-saas-drift.json` (per-person
+software). **Skip-empty:** a service with no records writes nothing; a clean
+service still writes its `*-drift.json` with `count: 0` for the external report
+step. This path rides `assemble.Build → shard → classify/drift` and **never**
+touches `internal/inventory`.
+
+### JumpCloud Software = per-person, email→device (`model.JCPersonSoftware`)
+
+`jumpcloud.ToPersonSoftware(systems, saas, meta)` (invoked in `assemble`) folds,
+per person keyed by lower-cased email, every app/extension on the devices they
+own (device `OwnerEmail` is the anchor) plus their SaaS-app memberships (SaaS
+account email, falling back to the device-agent `DeviceOwner`). Store-only: no
+monitored fields, never classified.
+
+### Whitelist filters (early purge)
+
+`internal/allowlist` loads plain-text `*.filter` files; `internal/filter.Apply`
+purges known-good entries once, immediately after `service.Collect` and before
+`inv.Finalize()` / `assemble.Build()`. Listed names/domains are removed from
+inventory, snapshot, SaaS export, and Sheets inputs — not filtered again at the
+Sheets layer.
+
+Files under `local/baseline/` (override via `FILTER_*` env vars):
+
+- `jc-apps.filter` + `jc-system.filter` — software/extension names (merged)
+- `jc-localusers-macos.filter` / `jc-localusers-windows.filter` — local usernames
+- `jc-saas-owner.filter` — SaaS account email domains
+- `gw-apps.filter` — GWS `ConnectedApp.DisplayText`
+
+`serviceview.SoftwareDrift` returns nil after early purge; the JumpCloud Software
+full tab is the actionable view. `(Drift)` companion is skipped when empty.
+
+### Sheets (Drift) companions
+
+`sheets.writeFullAndDrift[T]` writes a full tab plus, when a drift set is given,
+a `<Name> (Drift)` companion (same columns, only drifting rows; skipped if empty).
+Used by `WriteGWS`/`WriteJC`/`WriteSophos` (findings-keyed). `WriteJCSoftware`
+writes the per-person full tab; its `(Drift)` companion is skipped when empty
+after early purge. Tab names live
+in `config.Sheets` (`*Worksheet` + `*DriftWorksheet`); `(Drift)` companions ride
+their parent's `--tabs` key.
 
 ---
 
@@ -495,7 +579,9 @@ depend only on the standard library and are fully testable offline.
 | Add a monitored field to an existing entity | `internal/model/model.go`, collector's `to_model.go`, `local/baseline/classes.json` |
 | Add a new baseline class | `local/baseline/classes.json` only |
 | Add a new collector (full) | See Section 3 — 11 steps |
-| Add a new Sheets tab | `internal/sheets/tabs_foo.go`, `cmd/inventory/publish.go`, `config/config.go` |
+| Add a new Sheets tab | `internal/sheets/tabs_foo.go`, `cmd/inventory/sheets.go` (buildSheetTabs + tabKey), `config/config.go` |
+| Add a `(Drift)` companion to a tab | `sheets.writeFullAndDrift` in the writer + `serviceview.DriftedIDs`; `*DriftWorksheet` in `config.go` |
+| Tune whitelist filters | edit `local/baseline/*.filter` or set `FILTER_*` env vars (no recompile) |
 | Add a new standalone binary | `cmd/foo/main.go` (3 lines), `config/config.go` if new creds needed |
 | Change tab name default | `config/config.go` optional() fallback |
 | Tune SaaS rate limit | `.env` → `JC_MAX_RPS` |

@@ -9,8 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"gogo-assets/internal/allowlist"
+	"gogo-assets/internal/assemble"
 	"gogo-assets/internal/baseline"
 	"gogo-assets/internal/digest"
+	"gogo-assets/internal/filter"
 	"gogo-assets/internal/inventory"
 	"gogo-assets/internal/jumpcloud"
 	"gogo-assets/internal/logging"
@@ -89,7 +92,7 @@ func TestInventoryPath(t *testing.T) {
 		want []string
 	}{
 		{"current by default", "", []string{"current", "inventory.json"}},
-		{"dated daily mirror", "2026-06-15", []string{"daily", "2026-06-15", "inventory.json"}},
+		{"dated daily mirror", "2026-06-15", []string{"daily", "jun15-2026", "inventory.json"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -186,6 +189,43 @@ func TestTargetTabs(t *testing.T) {
 	}
 }
 
+// TestFilterPurgesBeforeAssemble confirms allowlisted software is removed before
+// assemble builds the canonical shard consumed by persistence and Sheets.
+func TestFilterPurgesBeforeAssemble(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, allowlist.JCAppsFile), "Google Chrome\n")
+
+	inv := inventory.New()
+	inv.JCSystems = []jumpcloud.System{{
+		SystemID:   "s1",
+		OSFamily:   "darwin",
+		OwnerEmail: "owner@x.com",
+		Apps: []jumpcloud.App{
+			{Name: "Google Chrome"},
+			{Name: "Sketchy Tool"},
+		},
+	}}
+	src := assemble.Sources{JCSystems: inv.JCSystems}
+
+	filters, err := allowlist.LoadFromPaths(allowlist.Paths{BaselineDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	filter.Apply(inv, &src, filters)
+	inv.Finalize()
+
+	snap := assemble.Build(src, time.Date(2026, 7, 2, 10, 0, 0, 0, time.UTC), "2026-07-02")
+	if len(snap.JumpCloud.Software) != 1 {
+		t.Fatalf("software people = %d, want 1", len(snap.JumpCloud.Software))
+	}
+	if len(snap.JumpCloud.Software[0].Apps) != 1 || snap.JumpCloud.Software[0].Apps[0].Name != "Sketchy Tool" {
+		t.Errorf("software apps = %+v, want only Sketchy Tool", snap.JumpCloud.Software[0].Apps)
+	}
+	if len(inv.JCSystems[0].Apps) != 1 {
+		t.Errorf("inventory apps not purged: %+v", inv.JCSystems[0].Apps)
+	}
+}
+
 // TestWriteInventory_RoundTrip confirms the persisted source of truth preserves
 // the fields the lean snapshot drops: JC software and the cross-source device
 // join. Both must survive a WriteInventory → ReadJSON cycle, and a daily mirror
@@ -227,7 +267,7 @@ func TestWriteInventory_RoundTrip(t *testing.T) {
 	if len(got.SaaSApps) != 1 || got.SaaSApps[0].Name != "Figma" {
 		t.Errorf("SaaS lost in round-trip: %+v", got.SaaSApps)
 	}
-	if _, err := os.Stat(filepath.Join(root, "daily", "2026-06-17", "inventory.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(root, "daily", "jun17-2026", "inventory.json")); err != nil {
 		t.Errorf("daily inventory mirror missing: %v", err)
 	}
 }

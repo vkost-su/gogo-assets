@@ -9,6 +9,8 @@ import "time"
 // Names are not present on the applications-list entity — they are resolved from
 // the catalog (catalog apps) or the application detail (custom apps). Category
 // is a derived heuristic; the public API exposes no category taxonomy.
+
+// flag unapproved
 type SaaSApp struct {
 	AppID string `json:"app_id"`
 	Name  string `json:"name"`
@@ -86,7 +88,7 @@ func (a SaaSApp) LatestUsedAt() time.Time {
 type SaaSAccount struct {
 	AccountID    string    `json:"account_id"`
 	UserID       string    `json:"user_id,omitempty"`
-	Email        string    `json:"email,omitempty"`
+	Email        string    `json:"email,omitempty"` // flag non superunlimited.com emails
 	Username     string    `json:"username,omitempty"`
 	DeviceOwner  string    `json:"device_owner,omitempty"`
 	LatestUsedAt time.Time `json:"latest_used_at,omitempty"`

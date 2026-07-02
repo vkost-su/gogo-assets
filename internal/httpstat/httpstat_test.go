@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -44,6 +45,63 @@ func TestCounterTalliesByStatus(t *testing.T) {
 	want := map[int]int{200: 500, 429: 100, 500: 12}
 	if !reflect.DeepEqual(s.ByStatus, want) {
 		t.Errorf("byStatus = %v, want %v", s.ByStatus, want)
+	}
+}
+
+// stubURLRT returns 404 for paths containing "missing", else 200.
+type stubURLRT struct{}
+
+func (stubURLRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	code := 200
+	if strings.Contains(req.URL.Path, "missing") {
+		code = 404
+	}
+	return &http.Response{StatusCode: code, Body: http.NoBody}, nil
+}
+
+func doURL(rt http.RoundTripper, url string) {
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	_, _ = rt.RoundTrip(req)
+}
+
+func TestNotFoundGroupsByEndpoint(t *testing.T) {
+	c := New()
+	rt := c.Wrap(stubURLRT{})
+	// Same endpoint template, different ids → one group.
+	doURL(rt, "http://jc.example/api/systeminsights/62f0000000000000000000a1/missing")
+	doURL(rt, "http://jc.example/api/systeminsights/62f0000000000000000000b2/missing")
+	doURL(rt, "http://jc.example/api/systeminsights/12345/missing")
+	// A different endpoint.
+	doURL(rt, "http://jc.example/api/apps/999/missing")
+	// A 200 must not appear in the 404 breakdown.
+	doURL(rt, "http://jc.example/api/systems")
+
+	s := c.Snapshot()
+	if s.ByStatus[404] != 4 {
+		t.Errorf("status_404 = %d, want 4", s.ByStatus[404])
+	}
+	want := map[string]int{
+		"GET jc.example/api/systeminsights/{id}/missing": 3,
+		"GET jc.example/api/apps/{id}/missing":           1,
+	}
+	if !reflect.DeepEqual(s.NotFound, want) {
+		t.Errorf("NotFound = %v, want %v", s.NotFound, want)
+	}
+
+	// NotFoundArgs: total + endpoints ordered by count desc.
+	args := s.NotFoundArgs()
+	if args[0] != "total" || args[1] != 4 || args[2] != "endpoints" {
+		t.Fatalf("NotFoundArgs head = %v, want total/4/endpoints", args[:3])
+	}
+	lines := args[3].([]string)
+	if len(lines) != 2 || lines[0] != "GET jc.example/api/systeminsights/{id}/missing ×3" {
+		t.Errorf("NotFoundArgs endpoints = %v", lines)
+	}
+}
+
+func TestNotFoundArgsNilWhenNone(t *testing.T) {
+	if got := (Stats{}).NotFoundArgs(); got != nil {
+		t.Errorf("NotFoundArgs with no 404s = %v, want nil", got)
 	}
 }
 

@@ -187,8 +187,7 @@ func (c *Collector) stage2Enrich(
 				// Don't propagate: one bad system must not kill the whole run.
 				return nil
 			}
-			sw := len(result.Apps) + len(result.Programs) +
-				len(result.DEBPackages) + len(result.RPMPackages)
+			sw := SoftwareCount(result)
 			results = append(results, result)
 			c.log.Info("enriched",
 				"i", done, "total", total,
